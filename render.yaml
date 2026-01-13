@@ -10,7 +10,7 @@ services:
     disks:
       # soundlike.db を永続化するためのディスク
       - name: soundlike-db
-        mountPath: /root/soundlike.db
+        mountPath: /var/lib/soundlike
         sizeGB: 1 # 1GBで十分
       # アップロードされたファイルを永続化するためのディスク
       - name: uploads
@@ -27,14 +27,3 @@ services:
     # Dockerfileがある場所を指定
     dockerfilePath: ./frontend/Dockerfile
     dockerContext: ./frontend
-    # HTTPヘッダーとリライト/リダイレクトの設定
-    rewrites:
-      # APIリクエストをバックエンドに転送
-      - source: /api/:path*
-        destination: http://backend:8080/api/:path*
-      # アップロードされたファイルへのリクエストをバックエンドに転送
-      - source: /uploads/:path*
-        destination: http://backend:8080/uploads/:path*
-      # その他のリクエストは、React/Astroが処理できるようにindex.htmlにフォールバック (SPA対応)
-      - source: /:path*
-        destination: /index.html
