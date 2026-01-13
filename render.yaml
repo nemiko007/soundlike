@@ -19,7 +19,8 @@ services:
     secretFiles: # FirebaseのサービスアカウントキーをSecret Fileとしてマウント
       - name: firebase-service-account-key
         key: firebase-service-account-key.json
-        mountPath: /root/firebase-service-account-key.json  # --- フロントエンドサービス (Nginx) ---
+        mountPath: /root/firebase-service-account-key.json
+  # --- フロントエンドサービス (Nginx) ---
   - type: web
     name: frontend
     env: docker
