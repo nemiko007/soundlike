@@ -3,19 +3,15 @@ services:
   - type: web
     name: backend
     env: docker
+    plan: free
     # Dockerfileがある場所を指定
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
-    # ディスクの設定
-    disk:
-      # soundlike.db を永続化するためのディスク
-      name: soundlike-db
-      mountPath: /var/lib/soundlike
-      sizeGB: 1 # 1GBで十分
   # --- フロントエンドサービス (Nginx) ---
   - type: web
     name: frontend
     env: docker
+    plan: free
     # Dockerfileがある場所を指定
     dockerfilePath: ./frontend/Dockerfile
     dockerContext: ./frontend
