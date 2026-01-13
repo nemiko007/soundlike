@@ -2,7 +2,7 @@
 
 # --- ビルドステージ ---
 # Node.jsイメージを使ってフロントエンドをビルド
-FROM node:20-alpine AS builder
+FROM node:20-slim AS builder
 
 WORKDIR /app
 
@@ -12,6 +12,9 @@ RUN npm install
 
 # ソースコードをコピーしてビルド
 COPY . .
+
+# ビルド時のメモリ不足対策としてヒープサイズを拡張
+ENV NODE_OPTIONS="--max-old-space-size=4096"
 # Astroのビルドコマンドを実行
 RUN npm run build
 
