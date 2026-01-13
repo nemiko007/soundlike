@@ -7,18 +7,13 @@ services:
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
     # ディスクの設定
-    disks:
+    disk:
       # soundlike.db を永続化するためのディスク
-      - name: soundlike-db
-        mountPath: /var/lib/soundlike
-        sizeGB: 1 # 1GBで十分
-      # アップロードされたファイルを永続化するためのディスク
-      - name: uploads
-        mountPath: /root/uploads
-        sizeGB: 1
+      name: soundlike-db
+      mountPath: /var/lib/soundlike
+      sizeGB: 1 # 1GBで十分
     secretFiles: # FirebaseのサービスアカウントキーをSecret Fileとしてマウント
       - name: firebase-service-account-key
-        key: firebase-service-account-key.json
         mountPath: /root/firebase-service-account-key.json
   # --- フロントエンドサービス (Nginx) ---
   - type: web
