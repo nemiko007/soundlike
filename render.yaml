@@ -12,9 +12,6 @@ services:
       name: soundlike-db
       mountPath: /var/lib/soundlike
       sizeGB: 1 # 1GBで十分
-    secretFiles: # FirebaseのサービスアカウントキーをSecret Fileとしてマウント
-      - name: firebase-service-account-key
-        mountPath: /root/firebase-service-account-key.json
   # --- フロントエンドサービス (Nginx) ---
   - type: web
     name: frontend
