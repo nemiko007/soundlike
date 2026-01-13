@@ -1,0 +1,27 @@
+# docker-compose.yml
+
+services:
+  backend:
+    build:
+      context: ./backend # backendフォルダ内のDockerfileを使う
+    ports:
+      - "8080:8080" # ホストの8080ポートをコンテナの8080ポートにマッピング
+    volumes:
+      - ./backend/soundlike.db:/root/soundlike.db # データベースファイルを永続化
+      - ./backend/uploads:/root/uploads # アップロードされたMP3ファイルを永続化
+      - ./backend/firebase-service-account-key.json:/root/firebase-service-account-key.json:ro # Firebaseサービスアカウントキーを読み取り専用でマウント
+    environment:
+      # 必要であれば環境変数をここで設定
+      # 例えば、GOOGLE_APPLICATION_CREDENTIALS=/root/firebase-service-account-key.json
+      # バックエンドのGoコードでCredentialsFileを使っているので、ここでは不要だが参考
+      TZ: Asia/Tokyo # タイムゾーンを設定
+    restart: always # コンテナが停止した場合に常に再起動
+
+  frontend:
+    build:
+      context: ./frontend # frontendフォルダ内のDockerfileを使う
+    ports:
+      - "3000:80" # ホストの3000ポートをコンテナの80ポート（Nginx）にマッピング
+    depends_on:
+      - backend # バックエンドが起動してからフロントエンドを起動
+    restart: always # コンテナが停止した場合に常に再起動

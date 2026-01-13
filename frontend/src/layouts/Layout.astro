@@ -1,0 +1,41 @@
+---
+import '../styles/global.css'; // Tailwind CSSをインポート！
+
+interface Props {
+	title: string;
+}
+
+const { title } = Astro.props;
+---
+
+<!doctype html>
+<html lang="en" class="bg-gyaru-black text-white">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width" />
+		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+		<meta name="generator" content={Astro.generator} />
+		<title>{title}</title>
+	</head>
+	<body>
+		<slot />
+	</body>
+</html>
+
+<style is:global>
+  html, body {
+    height: 100%;
+  }
+
+  /* リンクの色を強制的にギャルピンクにする */
+  a {
+    color: #ff69b4; /* gyaru-pinkのHEXコードを直接指定 */
+    font-weight: bold;
+    text-decoration: none;
+  }
+
+  a:hover {
+    text-decoration: underline;
+    color: rgba(255, 105, 180, 0.8); /* ホバー時の色も調整 */
+  }
+</style>

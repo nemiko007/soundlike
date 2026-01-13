@@ -1,0 +1,15 @@
+---
+import Layout from '../layouts/Layout.astro';
+import TrackList from '../components/TrackList.tsx';
+import TrackHeader from '../components/TrackHeader.tsx'; // TrackHeaderコンポーネントをインポート
+
+---
+
+<Layout title="All Tracks - Soundlike">
+  <main class="p-4 sm:p-6 lg:p-8"> {/* 余白を追加！ */}
+    <div className="max-w-md mx-auto p-8 bg-gyaru-black rounded-xl shadow-lg text-white"> {/* mt-10 を削除 */}
+      <TrackHeader client:load /> {/* TrackHeaderコンponentをレンダリング */}
+      <TrackList client:load /> {/* TrackListコンポーネントをレンダリング */}
+    </div>
+  </main>
+</Layout>
