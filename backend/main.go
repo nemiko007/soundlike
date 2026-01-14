@@ -12,24 +12,23 @@ import (
 	"strings"
 	"time"
 
-	"firebase.google.com/go/v4"
+	firebase "firebase.google.com/go/v4"
 	"firebase.google.com/go/v4/auth"
 	"github.com/google/uuid" // 追加
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	_ "github.com/mattn/go-sqlite3"
-	"google.golang.org/api/option"
 )
 
 // Track構造体: データベースのレコードをGoのオブジェクトとして扱うため
 type Track struct {
-	ID         int    `json:"id"`
-	Filename   string `json:"filename"`
-	Title      string `json:"title"`
-	Artist     string `json:"artist"`
-	Lyrics     string `json:"lyrics"`
-	UploaderUID string `json:"uploader_uid"`
-	CreatedAt  time.Time `json:"created_at"`
+	ID          int       `json:"id"`
+	Filename    string    `json:"filename"`
+	Title       string    `json:"title"`
+	Artist      string    `json:"artist"`
+	Lyrics      string    `json:"lyrics"`
+	UploaderUID string    `json:"uploader_uid"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 // firebaseAuthMiddleware は、リクエストヘッダーからIDトークンを検証するミドルウェア
@@ -57,7 +56,7 @@ func firebaseAuthMiddleware(app *firebase.App) echo.MiddlewareFunc {
 				log.Printf("error verifying ID token: %v\n", err)
 				return c.JSON(http.StatusForbidden, "Invalid ID token")
 			}
-			
+
 			c.Set("user", token)
 			return next(c)
 		}
@@ -68,8 +67,9 @@ var db *sql.DB // グローバル変数としてデータベース接続を保�
 
 func main() {
 	ctx := context.Background()
-	opt := option.WithCredentialsFile("firebase-service-account-key.json")
-	app, err := firebase.NewApp(ctx, nil, opt)
+	// render.yamlで設定したGOOGLE_APPLICATION_CREDENTIALS環境変数を自動的に読み込むようにするため、
+	// 明示的なファイルパス指定を削除します。
+	app, err := firebase.NewApp(ctx, nil)
 	if err != nil {
 		log.Fatalf("error initializing app: %v\n", err)
 	}
@@ -102,7 +102,9 @@ func main() {
 	e.Use(middleware.Logger())
 	e.Use(middleware.Recover())
 	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
-		AllowOrigins: []string{"http://localhost:3000"},
+		// localhostと、デプロイされたフロントエンドのURLを許可します。
+		// "https://frontend-xxxx.onrender.com" の部分はご自身のフロントエンドのURLに置き換えてください。
+		AllowOrigins: []string{"http://localhost:3000", "https://frontend-xxxx.onrender.com"},
 		AllowHeaders: []string{echo.HeaderOrigin, echo.HeaderContentType, echo.HeaderAccept, echo.HeaderAuthorization},
 	}))
 
@@ -166,9 +168,9 @@ func main() {
 		// ファイル名をUUIDでユニーク化
 		originalFileName := filepath.Base(file.Filename)
 		uniqueFileName := uuid.New().String() + "_" + originalFileName
-		
+
 		dstPath := filepath.Join("uploads", uniqueFileName)
-		
+
 		dst, err := os.Create(dstPath)
 		if err != nil {
 			return c.JSON(http.StatusInternalServerError, "Error creating the destination file")
@@ -230,7 +232,6 @@ func main() {
 
 		return c.JSON(http.StatusOK, map[string]string{"message": "Track deleted successfully!"})
 	})
-
 
 	e.Logger.Fatal(e.Start(":8080"))
 }
