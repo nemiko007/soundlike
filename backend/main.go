@@ -22,13 +22,14 @@ import (
 
 // Track構造体: データベースのレコードをGoのオブジェクトとして扱うため
 type Track struct {
-	ID          int       `json:"id"`
-	Filename    string    `json:"filename"`
-	Title       string    `json:"title"`
-	Artist      string    `json:"artist"`
-	Lyrics      string    `json:"lyrics"`
-	UploaderUID string    `json:"uploader_uid"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID           int       `json:"id"`
+	Filename     string    `json:"filename"`
+	Title        string    `json:"title"`
+	Artist       string    `json:"artist"`
+	Lyrics       string    `json:"lyrics"`
+	UploaderUID  string    `json:"uploader_uid"`
+	UploaderName string    `json:"uploader_name"` // 追加
+	CreatedAt    time.Time `json:"created_at"`
 }
 
 // firebaseAuthMiddleware は、リクエストヘッダーからIDトークンを検証するミドルウェア
@@ -75,7 +76,13 @@ func main() {
 	}
 
 	// === SQLiteデータベースの初期化 ===
-	db, err = sql.Open("sqlite3", "./soundlike.db")
+	dataDir := "./data"
+	if _, err := os.Stat(dataDir); os.IsNotExist(err) {
+		if err := os.MkdirAll(dataDir, 0o755); err != nil {
+			log.Fatalf("error creating data directory: %v\n", err)
+		}
+	}
+	db, err = sql.Open("sqlite3", filepath.Join(dataDir, "soundlike.db"))
 	if err != nil {
 		log.Fatalf("error opening database: %v\n", err)
 	}
@@ -90,13 +97,20 @@ func main() {
 		artist TEXT,
 		lyrics TEXT,
 		uploader_uid TEXT NOT NULL,
+		uploader_name TEXT,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);`
 	_, err = db.Exec(createTableSQL)
 	if err != nil {
 		log.Fatalf("error creating tracks table: %v\n", err)
 	}
-	log.Println("Database and 'tracks' table initialized successfully.")
+
+	// 既存のテーブルに uploader_name カラムがない場合に追加するための処理（簡易マイグレーション）
+	// エラーが発生しても（カラムが既に存在するなど）、ログを出して続行します
+	if _, err := db.Exec("ALTER TABLE tracks ADD COLUMN uploader_name TEXT"); err != nil {
+		log.Println("Info: uploader_name column might already exist or could not be added:", err)
+	}
+	log.Println("Database initialized successfully.")
 
 	e := echo.New()
 	e.Use(middleware.Logger())
@@ -112,7 +126,7 @@ func main() {
 	e.Static("/uploads", "uploads")
 
 	e.GET("/api/tracks", func(c echo.Context) error {
-		rows, err := db.Query("SELECT id, filename, title, artist, lyrics, uploader_uid, created_at FROM tracks ORDER BY created_at DESC")
+		rows, err := db.Query("SELECT id, filename, title, artist, lyrics, uploader_uid, uploader_name, created_at FROM tracks ORDER BY created_at DESC")
 		if err != nil {
 			log.Printf("error querying tracks: %v\n", err)
 			return c.JSON(http.StatusInternalServerError, "Error retrieving tracks")
@@ -125,12 +139,14 @@ func main() {
 			// lyricsとartistはNULL許容のため、sql.NullStringで受け取る
 			var artist sql.NullString
 			var lyrics sql.NullString
-			if err := rows.Scan(&track.ID, &track.Filename, &track.Title, &artist, &lyrics, &track.UploaderUID, &track.CreatedAt); err != nil {
+			var uploaderName sql.NullString // uploader_nameもNULL許容として扱う
+			if err := rows.Scan(&track.ID, &track.Filename, &track.Title, &artist, &lyrics, &track.UploaderUID, &uploaderName, &track.CreatedAt); err != nil {
 				log.Printf("error scanning track row: %v\n", err)
 				return c.JSON(http.StatusInternalServerError, "Error processing tracks")
 			}
 			track.Artist = artist.String
 			track.Lyrics = lyrics.String
+			track.UploaderName = uploaderName.String // NULLの場合は空文字になる
 			tracks = append(tracks, track)
 		}
 
@@ -149,6 +165,7 @@ func main() {
 		title := c.FormValue("title")
 		artist := c.FormValue("artist")
 		lyrics := c.FormValue("lyrics")
+		uploaderName := c.FormValue("uploader_name") // フロントエンドから送信された名前を取得
 
 		if title == "" {
 			return c.JSON(http.StatusBadRequest, "Title is required")
@@ -182,12 +199,12 @@ func main() {
 		}
 
 		// データベースにメタデータを保存
-		insertSQL := `INSERT INTO tracks (filename, title, artist, lyrics, uploader_uid) VALUES (?, ?, ?, ?, ?)`
-		_, err = db.Exec(insertSQL, uniqueFileName, title, artist, lyrics, user.UID)
+		insertSQL := `INSERT INTO tracks (filename, title, artist, lyrics, uploader_uid, uploader_name) VALUES (?, ?, ?, ?, ?, ?)`
+		_, err = db.Exec(insertSQL, uniqueFileName, title, artist, lyrics, user.UID, uploaderName)
 		if err != nil {
 			log.Printf("error inserting track metadata: %v\n", err)
 			// ファイルは保存されたがDB登録失敗した場合は、保存したファイルも削除するべきだが、今回は簡易化
-			return c.JSON(http.StatusInternalServerError, "Error saving track metadata")
+			return c.JSON(http.StatusInternalServerError, map[string]string{"message": "Error saving track metadata: " + err.Error()})
 		}
 
 		return c.JSON(http.StatusOK, map[string]string{"message": "File " + originalFileName + " and metadata uploaded successfully with ID " + uniqueFileName + "!"})

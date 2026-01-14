@@ -1,11 +1,12 @@
 // src/components/Login.tsx
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { auth } from "../firebase/client";
 import {
   onAuthStateChanged,
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
   signOut,
+  updateProfile,
   type User as FirebaseAuthUser,
 } from "firebase/auth";
 
@@ -19,19 +20,52 @@ export default function Login() {
   const [title, setTitle] = useState<string>("");
   const [artist, setArtist] = useState<string>("");
   const [lyrics, setLyrics] = useState<string>("");
+  const [displayName, setDisplayName] = useState("");
+  const lastUidRef = useRef<string | null>(null);
 
+  // ユーザーの認証状態を監視し、userステートを更新する
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (user) => {
       setUser(user);
-      setError(null);
-      setMessage("");
-      setFile(null);
-      setTitle("");
-      setArtist("");
-      setLyrics("");
     });
     return () => unsubscribe();
   }, []);
+
+  // userステート（ログイン状態）の変化に応じてフォームの初期化やリセットを行う
+  useEffect(() => {
+    if (user) {
+      // ユーザーが切り替わった場合（ログイン直後など）のみフォームを初期化
+      // Firebaseのトークン更新などでuserオブジェクトが変わっても、UIDが同じなら入力中のフォームをリセットしない
+      if (user.uid !== lastUidRef.current) {
+        setDisplayName(user.displayName || "");
+        lastUidRef.current = user.uid;
+
+        // ログイン時にメッセージやアップロードフォームをリセット
+        setError(null);
+        setMessage("");
+        setFile(null);
+        setTitle("");
+        setArtist("");
+        setLyrics("");
+      }
+    } else {
+      // ログアウト時
+      if (lastUidRef.current !== null) {
+        setDisplayName("");
+        setEmail("");
+        setPassword("");
+        lastUidRef.current = null;
+
+        // ログアウト時にフォームをリセット
+        setError(null);
+        setMessage("");
+        setFile(null);
+        setTitle("");
+        setArtist("");
+        setLyrics("");
+      }
+    }
+  }, [user]);
 
   const handleLoginOrSignUp = async () => {
     if (!email || !password) {
@@ -63,6 +97,23 @@ export default function Login() {
     }
   };
 
+  const handleUpdateProfile = async () => {
+    if (!user) return;
+    setError(null);
+    setMessage("");
+
+    try {
+      // Firebase Authのユーザープロファイルを更新
+      await updateProfile(user, {
+        displayName: displayName,
+      });
+
+      setMessage("Profile updated successfully! ✨");
+    } catch (e: any) {
+      setError(e.message);
+    }
+  };
+
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
       setFile(e.target.files[0]);
@@ -88,6 +139,19 @@ export default function Login() {
     formData.append("title", title);
     formData.append("artist", artist);
     formData.append("lyrics", lyrics);
+    
+    // アップロード時に入力されている名前があれば、それをプロフィールとして保存しておく（次回の利便性のため）
+    if (displayName && displayName !== user.displayName) {
+      try {
+        await updateProfile(user, { displayName });
+      } catch (e) {
+        console.error("Failed to update profile", e);
+      }
+    }
+
+    // 優先順位: 入力値 > プロフィール値 > メールアドレスの@より前 > "Anonymous"
+    const uploaderName = displayName || user.displayName || user.email?.split('@')[0] || "Anonymous";
+    formData.append("uploader_name", uploaderName);
 
     try {
       const idToken = await user.getIdToken();
@@ -122,8 +186,18 @@ export default function Login() {
     <div className="max-w-md mx-auto p-8 bg-gyaru-black rounded-xl shadow-lg text-white"> {/* mt-10 を削除 */}
       {user ? (
         <div className="space-y-4"> {/* Spacing for logged-in view */}
-          <h2 className="text-3xl font-extrabold text-center text-gyaru-pink">Welcome, {user.email}! ✨</h2> {/* Larger heading */}
+          <h2 className="text-3xl font-extrabold text-center text-gyaru-pink">Welcome, {user.displayName || user.email}! ✨</h2> {/* Larger heading */}
           <p className="text-center text-lg"><a href="/tracks/" className="!text-gyaru-pink !font-bold hover:!text-gyaru-pink/80 hover:!underline">View all tracks</a></p> {/* リンク修正 with !important */}
+          
+          <div className="border-t border-gray-700 py-4 space-y-3">
+            <h3 className="text-xl font-semibold text-gyaru-pink">Profile Settings 💖</h3>
+            <div>
+              <label className="block text-sm font-medium text-gray-300 mb-1">Display Name</label>
+              <input type="text" value={displayName} onChange={(e) => setDisplayName(e.target.value)} className="p-2 bg-gray-800 text-white border border-gray-600 rounded-md w-full focus:ring-gyaru-pink focus:border-gyaru-pink" placeholder="Your Name" />
+            </div>
+            <button onClick={handleUpdateProfile} className="w-full py-2 px-4 bg-gray-700 hover:bg-gray-600 rounded-md text-white font-bold transition-colors">Update Profile</button>
+          </div>
+
           <div className="border-t border-b border-gray-700 py-6 my-4 space-y-4"> {/* Adjusted padding */}
             <h3 className="text-2xl font-semibold mb-3">Upload a new MP3</h3> {/* Larger heading */}
             <div>

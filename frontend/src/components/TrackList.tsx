@@ -10,6 +10,7 @@ interface Track {
   artist: string | null;
   lyrics: string | null;
   uploader_uid: string;
+  uploader_name?: string;
   created_at: string;
 }
 
@@ -100,7 +101,7 @@ export default function TrackList() {
               <div>
                 <h2 className="text-3xl font-extrabold mb-2 text-gyaru-pink">{track.title}</h2> {/* Larger title */}
                 {track.artist && <p className="text-gray-300 text-lg mb-1"><span className="font-semibold">Artist:</span> {track.artist}</p>} {/* Larger artist */}
-                <p className="text-gray-400 text-sm mb-2">Uploaded by: {track.uploader_uid.substring(0, 8)}...</p>
+                <p className="text-gray-400 text-sm mb-2">Track by: {track.uploader_name || "Anonymous"}</p>
                 {track.lyrics && (
                   <div className="bg-gyaru-black/20 border border-gray-600 p-3 mt-4 rounded-md whitespace-pre-wrap text-base text-gray-200 overflow-y-auto max-h-32"> {/* Adjusted padding and font size */}
                     <h4 className="font-medium mb-2 text-xl text-gyaru-pink">Lyrics:</h4> {/* Larger lyrics heading */}

@@ -29,7 +29,7 @@ WORKDIR /root/
 
 # soundlike.dbとuploadsディレクトリを空で追加
 # これらは永続化のためにボリュームとしてマウントされることを想定
-RUN mkdir -p /root/uploads
+RUN mkdir -p /root/uploads /root/data
 
 # サービスアカウントキーはローカルまたはシークレットとして提供されるべき
 # Dockerイメージに含めるべきではないが、開発・テスト用に配置するパスを確保
