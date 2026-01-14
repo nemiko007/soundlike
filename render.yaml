@@ -24,8 +24,10 @@ services:
     routes:
       # APIリクエストをバックエンドへ転送 (Nginxのproxy_passの代わり)
       # バックエンドのパスに合わせて調整してください
+      # 【重要】Static Siteからは http://backend:8080 は使えません。
+      # デプロイ後にBackendサービスの公開URL (https://backend-name.onrender.com/api/*) に書き換えてください。
       - source: /api/*
-        destination: http://backend:8080/api/*
+        destination: https://backend-1ehw.onrender.com/api/*
         type: rewrite
       # SPAのリダイレクト設定 (すべての不明なパスをindex.htmlへ)
       - source: /*
