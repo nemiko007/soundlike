@@ -16,9 +16,8 @@ services:
         value: /etc/secrets/firebase-service-account-key.json
 
   # --- フロントエンドサービス (Nginx) ---
-  - type: web
+  - type: static
     name: frontend
-    env: static
     plan: free
     region: singapore
     rootDir: frontend
