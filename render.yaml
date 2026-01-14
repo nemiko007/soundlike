@@ -4,14 +4,23 @@ services:
     name: backend
     env: docker
     plan: free
+    region: singapore # 日本からアクセスしやすいリージョン（任意）
     # Dockerfileがある場所を指定
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
+    envVars:
+      - key: PORT
+        value: 8080
+      # Firebaseキーのパス（RenderのSecret Files機能でこのパスに配置します）
+      - key: GOOGLE_APPLICATION_CREDENTIALS
+        value: /etc/secrets/firebase-service-account-key.json
+
   # --- フロントエンドサービス (Nginx) ---
   - type: web
     name: frontend
     env: docker
     plan: free
+    region: singapore
     # Dockerfileがある場所を指定
     dockerfilePath: ./frontend/Dockerfile
     dockerContext: ./frontend

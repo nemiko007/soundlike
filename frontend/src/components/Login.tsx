@@ -55,10 +55,6 @@ export default function Login() {
     }
   };
 
-  const handleViewTracks = () => {
-    window.location.href = `${window.location.origin}/tracks`;
-  };
-
   const handleLogout = async () => {
     try {
       await signOut(auth);
@@ -127,7 +123,7 @@ export default function Login() {
       {user ? (
         <div className="space-y-4"> {/* Spacing for logged-in view */}
           <h2 className="text-3xl font-extrabold text-center text-gyaru-pink">Welcome, {user.email}! ✨</h2> {/* Larger heading */}
-          <p className="text-center text-lg"><button onClick={handleViewTracks} className="!text-gyaru-pink !font-bold hover:!text-gyaru-pink/80 hover:!underline">View all tracks</button></p> {/* リンク修正 with !important */}
+          <p className="text-center text-lg"><a href="/tracks/" className="!text-gyaru-pink !font-bold hover:!text-gyaru-pink/80 hover:!underline">View all tracks</a></p> {/* リンク修正 with !important */}
           <div className="border-t border-b border-gray-700 py-6 my-4 space-y-4"> {/* Adjusted padding */}
             <h3 className="text-2xl font-semibold mb-3">Upload a new MP3</h3> {/* Larger heading */}
             <div>
