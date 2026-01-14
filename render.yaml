@@ -24,6 +24,14 @@ services:
     rootDir: frontend
     buildCommand: npm install && npm run build
     publishPath: dist
+    routes:
+      # APIリクエストをバックエンドへ転送 (Nginxのproxy_passの代わり)
+      # バックエンドのパスに合わせて調整してください
+      - source: /api/*
+        destination: http://backend:8080/api/*
+      # SPAのリダイレクト設定 (すべての不明なパスをindex.htmlへ)
+      - source: /*
+        destination: /index.html
     envVars:
       # フロントエンドのビルドに必要な環境変数を指定します
       # 変数名はプロジェクトのコード内で使用しているもの（.envなど）に合わせて変更してください
