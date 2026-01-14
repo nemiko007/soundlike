@@ -24,3 +24,10 @@ services:
     # Dockerfileがある場所を指定
     dockerfilePath: ./frontend/Dockerfile
     dockerContext: ./frontend
+    envVars:
+      # フロントエンドのビルドに必要な環境変数を指定します
+      # 変数名はプロジェクトのコード内で使用しているもの（.envなど）に合わせて変更してください
+      - key: VITE_FIREBASE_API_KEY
+        sync: false
+      - key: VITE_FIREBASE_AUTH_DOMAIN
+        sync: false
