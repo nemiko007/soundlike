@@ -4,7 +4,6 @@ services:
     name: backend
     env: docker
     plan: free
-    region: singapore # 日本からアクセスしやすいリージョン（任意）
     # Dockerfileがある場所を指定
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
@@ -19,7 +18,6 @@ services:
   - type: web
     name: frontend
     env: static
-    plan: free
     rootDir: frontend
     buildCommand: npm install && npm run build
     staticPublishPath: dist
