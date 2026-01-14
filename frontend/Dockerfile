@@ -31,6 +31,9 @@ ENV PUBLIC_FIREBASE_MESSAGING_SENDER_ID=$PUBLIC_FIREBASE_MESSAGING_SENDER_ID
 ENV PUBLIC_FIREBASE_APP_ID=$PUBLIC_FIREBASE_APP_ID
 ENV PUBLIC_FIREBASE_MEASUREMENT_ID=$PUBLIC_FIREBASE_MEASUREMENT_ID
 
+# 【追加】変数が正しく渡されているかチェック（値が空ならエラーを出して停止）
+RUN if [ -z "$PUBLIC_FIREBASE_API_KEY" ]; then echo "ERROR: PUBLIC_FIREBASE_API_KEY is not set during build."; exit 1; fi
+
 # ビルド時のメモリ不足対策としてヒープサイズを拡張
 ENV NODE_OPTIONS="--max-old-space-size=4096"
 # Astroのビルドコマンドを実行
