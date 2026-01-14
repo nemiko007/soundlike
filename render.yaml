@@ -29,6 +29,10 @@ services:
       - source: /api/*
         destination: https://backend-1ehw.onrender.com/api/*
         type: rewrite
+      # アップロードされたMP3ファイルへのアクセスをバックエンドへ転送
+      - source: /uploads/*
+        destination: https://backend-1ehw.onrender.com/uploads/*
+        type: rewrite
       # SPAのリダイレクト設定 (すべての不明なパスをindex.htmlへ)
       - source: /*
         destination: /index.html
