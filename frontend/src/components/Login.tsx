@@ -8,6 +8,7 @@ import {
   signOut,
   updateProfile,
   type User as FirebaseAuthUser,
+  sendEmailVerification,
 } from "firebase/auth";
 
 export default function Login() {
@@ -78,7 +79,9 @@ export default function Login() {
     } catch (signInError: any) {
       if (signInError.code === 'auth/user-not-found' || signInError.code === 'auth/invalid-credential') {
         try {
-          await createUserWithEmailAndPassword(auth, email, password);
+          const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+          await sendEmailVerification(userCredential.user);
+          setMessage("Account created! Verification email sent. Please check your inbox. 📧");
         } catch (signUpError: any) {
           setError(signUpError.message);
         }
@@ -109,6 +112,18 @@ export default function Login() {
       });
 
       setMessage("Profile updated successfully! ✨");
+    } catch (e: any) {
+      setError(e.message);
+    }
+  };
+
+  const handleSendVerificationEmail = async () => {
+    if (!user) return;
+    setMessage("");
+    setError(null);
+    try {
+      await sendEmailVerification(user);
+      setMessage("Verification email sent! Please check your inbox. 📧");
     } catch (e: any) {
       setError(e.message);
     }
@@ -189,6 +204,15 @@ export default function Login() {
           <h2 className="text-3xl font-extrabold text-center text-gyaru-pink">Welcome, {user.displayName || user.email}! ✨</h2> {/* Larger heading */}
           <p className="text-center text-lg"><a href="/tracks/" className="!text-gyaru-pink !font-bold hover:!text-gyaru-pink/80 hover:!underline">View all tracks</a></p> {/* リンク修正 with !important */}
           
+          {!user.emailVerified && (
+            <div className="bg-yellow-900/30 border border-yellow-600/50 p-4 rounded-md text-center">
+              <p className="text-yellow-200 mb-2">Your email is not verified yet. ⚠️</p>
+              <button onClick={handleSendVerificationEmail} className="px-4 py-2 bg-yellow-600 hover:bg-yellow-500 text-white rounded-md font-bold text-sm transition-colors">
+                Send Verification Email
+              </button>
+            </div>
+          )}
+
           <div className="border-t border-gray-700 py-4 space-y-3">
             <h3 className="text-xl font-semibold text-gyaru-pink">Profile Settings 💖</h3>
             <div>
