@@ -155,15 +155,28 @@ func main() {
 			}
 		}
 
+		uploaderUID := c.QueryParam("uploader_uid")
+
 		// いいね数と、現在のユーザーがいいねしているかを取得するクエリ
-		query := `
+		baseQuery := `
 		SELECT 
 			t.id, t.filename, t.title, t.artist, t.lyrics, t.uploader_uid, t.uploader_name, t.created_at,
 			(SELECT COUNT(*) FROM likes WHERE track_id = t.id) AS likes_count,
 			EXISTS(SELECT 1 FROM likes WHERE track_id = t.id AND user_uid = ?) AS is_liked
-		FROM tracks t 
-		ORDER BY t.created_at DESC`
-		rows, err := db.Query(query, currentUserID)
+		FROM tracks t`
+
+		args := []interface{}{currentUserID}
+		var queryBuilder strings.Builder
+		queryBuilder.WriteString(baseQuery)
+
+		if uploaderUID != "" {
+			queryBuilder.WriteString(" WHERE t.uploader_uid = ?")
+			args = append(args, uploaderUID)
+		}
+
+		queryBuilder.WriteString(" ORDER BY t.created_at DESC")
+
+		rows, err := db.Query(queryBuilder.String(), args...)
 		if err != nil {
 			log.Printf("error querying tracks: %v\n", err)
 			return c.JSON(http.StatusInternalServerError, "Error retrieving tracks")
@@ -245,6 +258,60 @@ func main() {
 		}
 
 		return c.JSON(http.StatusOK, map[string]string{"message": "File " + originalFileName + " and metadata uploaded successfully with ID " + uniqueFileName + "!"})
+	})
+
+	// ProfileUpdateRequest defines the structure for the profile update request
+	type ProfileUpdateRequest struct {
+		DisplayName string `json:"display_name"`
+	}
+
+	// プロフィール更新API (表示名の重複チェックを含む)
+	apiGroup.POST("/profile", func(c echo.Context) error {
+		user := c.Get("user").(*auth.Token)
+
+		var req ProfileUpdateRequest
+		if err := c.Bind(&req); err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]string{"message": "Invalid request body"})
+		}
+
+		newDisplayName := strings.TrimSpace(req.DisplayName)
+		if newDisplayName == "" {
+			return c.JSON(http.StatusBadRequest, map[string]string{"message": "Display name cannot be empty"})
+		}
+
+		// 表示名の重複をチェック (自分以外のユーザーが使っていないか)
+		var existingUID string
+		err := db.QueryRow("SELECT uploader_uid FROM tracks WHERE uploader_name = ? AND uploader_uid != ? LIMIT 1", newDisplayName, user.UID).Scan(&existingUID)
+		if err == nil { // errがnilということは、レコードが見つかったということ
+			return c.JSON(http.StatusConflict, map[string]string{"message": "Display name '" + newDisplayName + "' is already taken."})
+		}
+		if err != sql.ErrNoRows {
+			log.Printf("error checking display name uniqueness: %v\n", err)
+			return c.JSON(http.StatusInternalServerError, map[string]string{"message": "Error checking display name."})
+		}
+
+		// Firebase Authの表示名を更新
+		authClient, err := app.Auth(context.Background())
+		if err != nil {
+			log.Printf("error getting Auth client for profile update: %v\n", err)
+			return c.JSON(http.StatusInternalServerError, map[string]string{"message": "Internal server error."})
+		}
+		params := (&auth.UserToUpdate{}).DisplayName(newDisplayName)
+		if _, err := authClient.UpdateUser(context.Background(), user.UID, params); err != nil {
+			log.Printf("error updating firebase auth display name for user %s: %v\n", user.UID, err)
+			return c.JSON(http.StatusInternalServerError, map[string]string{"message": "Failed to update authentication profile."})
+		}
+
+		// 既存のトラックのuploader_nameをすべて更新
+		// この処理はAuthの更新が成功してから行う
+		if _, err := db.Exec("UPDATE tracks SET uploader_name = ? WHERE uploader_uid = ?", newDisplayName, user.UID); err != nil {
+			// ここで失敗した場合、Authの更新とDBの更新に不整合が起きるが、
+			// 次回のアップロードやプロフィール更新で修正される可能性が高い。
+			log.Printf("error updating uploader_name in tracks: %v\n", err)
+			return c.JSON(http.StatusInternalServerError, map[string]string{"message": "Error updating track information."})
+		}
+
+		return c.JSON(http.StatusOK, map[string]string{"message": "Profile updated successfully!"})
 	})
 
 	// いいねしたトラック一覧を取得するAPI

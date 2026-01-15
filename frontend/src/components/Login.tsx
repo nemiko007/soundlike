@@ -123,17 +123,36 @@ export default function Login() {
   };
 
   const handleUpdateProfile = async () => {
-    if (!user) return;
+    if (!user) {
+      setError("You must be logged in to update your profile.");
+      return;
+    }
+    const trimmedDisplayName = displayName.trim();
+    if (!trimmedDisplayName) {
+      setError("Display name cannot be empty.");
+      return;
+    }
     setError(null);
     setMessage("");
 
     try {
-      // Firebase Authのユーザープロファイルを更新
-      await updateProfile(user, {
-        displayName: displayName,
+      const idToken = await user.getIdToken();
+      const res = await fetch("/api/profile", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${idToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ display_name: trimmedDisplayName }),
       });
 
-      setMessage("Profile updated successfully! ✨");
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.message || "Failed to update profile.");
+      }
+
+      await user.reload(); // サーバー側で更新された最新のユーザー情報を取得
+      setMessage(data.message);
     } catch (e: any) {
       setError(e.message);
     }
@@ -196,17 +215,8 @@ export default function Login() {
     formData.append("artist", artist);
     formData.append("lyrics", lyrics);
     
-    // アップロード時に入力されている名前があれば、それをプロフィールとして保存しておく（次回の利便性のため）
-    if (displayName && displayName !== user.displayName) {
-      try {
-        await updateProfile(user, { displayName });
-      } catch (e) {
-        console.error("Failed to update profile", e);
-      }
-    }
-
-    // 優先順位: 入力値 > プロフィール値 > メールアドレスの@より前 > "Anonymous"
-    const uploaderName = displayName || user.displayName || user.email?.split('@')[0] || "Anonymous";
+    // 保存済みの表示名を使用する
+    const uploaderName = user.displayName || user.email?.split('@')[0] || "Anonymous";
     formData.append("uploader_name", uploaderName);
 
     try {

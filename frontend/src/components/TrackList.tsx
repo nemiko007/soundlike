@@ -16,6 +16,12 @@ interface Track {
   is_liked?: boolean;
 }
 
+interface ViewState {
+  mode: 'all' | 'favorites' | 'user';
+  uid?: string;
+  name?: string;
+}
+
 function getTrackUrl(filename: string) {
   return `/uploads/${filename}`;
 }
@@ -25,7 +31,7 @@ export default function TrackList() {
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [user, setUser] = useState<FirebaseAuthUser | null>(null); // ログイン中のユーザー情報
-  const [viewMode, setViewMode] = useState<'all' | 'favorites'>('all'); // 'all' or 'favorites'
+  const [view, setView] = useState<ViewState>({ mode: 'all' });
 
   // ユーザーの認証状態を監視
   useEffect(() => {
@@ -33,7 +39,7 @@ export default function TrackList() {
       setUser(currentUser);
       // ログアウトしたら 'all' モードに戻す
       if (!currentUser) {
-        setViewMode('all');
+        setView({ mode: 'all' });
       }
     });
     return () => unsubscribe();
@@ -56,7 +62,7 @@ export default function TrackList() {
           headers['Authorization'] = `Bearer ${idToken}`;
         }
 
-        if (viewMode === 'favorites') {
+        if (view.mode === 'favorites') {
           if (!user) {
             // お気に入り表示にはログインが必要
             setTracks([]); // トラックを空にする
@@ -64,6 +70,8 @@ export default function TrackList() {
             return;
           }
           url = '/api/tracks/favorites';
+        } else if (view.mode === 'user' && view.uid) {
+          url = `/api/tracks?uploader_uid=${view.uid}`;
         }
 
         const response = await fetch(url, { headers });
@@ -79,7 +87,7 @@ export default function TrackList() {
       }
     };
     fetchTracks();
-  }, [viewMode, user]); // viewMode or user が変わったら再フェッチ
+  }, [view, user]); // view or user が変わったら再フェッチ
 
   const handleDelete = async (trackId: number, uploaderUid: string) => {
     if (!user || user.uid !== uploaderUid) {
@@ -134,7 +142,7 @@ export default function TrackList() {
 
       const data = await response.json();
       
-      if (viewMode === 'favorites' && !data.is_liked) {
+      if (view.mode === 'favorites' && !data.is_liked) {
         // お気に入りビューで「いいね」を解除した場合、リストから削除する
         setTracks(tracks.filter(track => track.id !== trackId));
       } else {
@@ -149,38 +157,62 @@ export default function TrackList() {
     }
   };
 
+  const handleUserClick = (uid: string, name?: string) => {
+    // 既にそのユーザーで絞り込んでいる場合は何もしない
+    if (view.mode === 'user' && view.uid === uid) return;
+    setView({ mode: 'user', uid, name: name || 'Anonymous' });
+  };
+
   if (loading) return <p className="text-gyaru-pink text-center text-lg mt-8">Loading tracks...</p>;
   if (error) return <p className="text-red-500 text-center text-lg mt-8">Error: {error}</p>;
 
   return (
     <div className="mt-8">
       {/* タブ切り替えUI */}
-      <div className="flex justify-center mb-6 border-b border-gray-700">
-        <button
-          onClick={() => setViewMode('all')}
-          className={`px-6 py-3 text-lg font-bold transition-colors ${
-            viewMode === 'all'
-              ? 'text-gyaru-pink border-b-2 border-gyaru-pink'
-              : 'text-gray-400 hover:text-white'
-          }`}
-        >
-          All Tracks
-        </button>
-        {user && (
+      <div className="mb-6">
+        <div className="flex justify-center border-b border-gray-700">
           <button
-            onClick={() => setViewMode('favorites')}
+            onClick={() => setView({ mode: 'all' })}
             className={`px-6 py-3 text-lg font-bold transition-colors ${
-              viewMode === 'favorites'
+              view.mode === 'all'
                 ? 'text-gyaru-pink border-b-2 border-gyaru-pink'
                 : 'text-gray-400 hover:text-white'
             }`}
           >
-            My Favorites 💖
+            All Tracks
           </button>
+          {user && (
+            <button
+              onClick={() => setView({ mode: 'favorites' })}
+              className={`px-6 py-3 text-lg font-bold transition-colors ${
+                view.mode === 'favorites'
+                  ? 'text-gyaru-pink border-b-2 border-gyaru-pink'
+                  : 'text-gray-400 hover:text-white'
+              }`}
+            >
+              My Favorites 💖
+            </button>
+          )}
+        </div>
+        {view.mode === 'user' && (
+          <div className="text-center mt-4 p-2 bg-gyaru-pink/10 rounded-lg">
+            <h3 className="text-md text-gray-300">
+              Showing tracks by: <span className="font-bold text-gyaru-pink">{view.name}</span>
+            </h3>
+            <button onClick={() => setView({ mode: 'all' })} className="text-sm text-gyaru-pink hover:underline">
+              (Show All Tracks)
+            </button>
+          </div>
         )}
       </div>
       {tracks.length === 0 && !loading ? (
-        <p className="text-gray-400 text-center text-lg mt-8">{viewMode === 'favorites' ? 'You have no favorite tracks yet. 💖' : 'No tracks uploaded yet. Be the first to upload one!'}</p>
+        <p className="text-gray-400 text-center text-lg mt-8">
+          {view.mode === 'favorites' 
+            ? 'You have no favorite tracks yet. 💖' 
+            : view.mode === 'user'
+            ? `No tracks found for ${view.name}.`
+            : 'No tracks uploaded yet. Be the first to upload one!'}
+        </p>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"> {/* Responsive grid */}
           {tracks.map((track) => (
@@ -188,7 +220,16 @@ export default function TrackList() {
               <div>
                 <h2 className="text-3xl font-extrabold mb-2 text-gyaru-pink">{track.title}</h2> {/* Larger title */}
                 {track.artist && <p className="text-gray-300 text-lg mb-1"><span className="font-semibold">Artist:</span> {track.artist}</p>} {/* Larger artist */}
-                <p className="text-gray-400 text-sm mb-2">Track by: {track.uploader_name || "Anonymous"}</p>
+                <p className="text-gray-400 text-sm mb-2">
+                  Track by:
+                  <button
+                    onClick={() => handleUserClick(track.uploader_uid, track.uploader_name)}
+                    className="ml-1 font-semibold text-gyaru-pink/80 hover:text-gyaru-pink hover:underline focus:outline-none disabled:text-gray-500 disabled:no-underline"
+                    disabled={view.mode === 'user' && view.uid === track.uploader_uid}
+                  >
+                    {track.uploader_name || "Anonymous"}
+                  </button>
+                </p>
                 {track.lyrics && (
                   <div className="bg-gyaru-black/20 border border-gray-600 p-3 mt-4 rounded-md whitespace-pre-wrap text-base text-gray-200 overflow-y-auto max-h-32"> {/* Adjusted padding and font size */}
                     <h4 className="font-medium mb-2 text-xl text-gyaru-pink">Lyrics:</h4> {/* Larger lyrics heading */}
