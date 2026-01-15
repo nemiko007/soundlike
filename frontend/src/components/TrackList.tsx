@@ -12,6 +12,8 @@ interface Track {
   uploader_uid: string;
   uploader_name?: string;
   created_at: string;
+  likes_count?: number;
+  is_liked?: boolean;
 }
 
 function getTrackUrl(filename: string) {
@@ -23,11 +25,16 @@ export default function TrackList() {
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [user, setUser] = useState<FirebaseAuthUser | null>(null); // ログイン中のユーザー情報
+  const [viewMode, setViewMode] = useState<'all' | 'favorites'>('all'); // 'all' or 'favorites'
 
   // ユーザーの認証状態を監視
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
       setUser(currentUser);
+      // ログアウトしたら 'all' モードに戻す
+      if (!currentUser) {
+        setViewMode('all');
+      }
     });
     return () => unsubscribe();
   }, []);
@@ -37,7 +44,29 @@ export default function TrackList() {
     const fetchTracks = async () => {
       try {
         setLoading(true);
-        const response = await fetch(`/api/tracks`);
+        setError(null); // Reset error on new fetch
+
+        let url = '/api/tracks';
+        const headers: HeadersInit = {};
+
+        // ログイン状態であれば、どのリクエストにもトークンを付与する
+        // (全件取得時にも is_liked を正しく判定するため)
+        if (user) {
+          const idToken = await user.getIdToken();
+          headers['Authorization'] = `Bearer ${idToken}`;
+        }
+
+        if (viewMode === 'favorites') {
+          if (!user) {
+            // お気に入り表示にはログインが必要
+            setTracks([]); // トラックを空にする
+            setLoading(false);
+            return;
+          }
+          url = '/api/tracks/favorites';
+        }
+
+        const response = await fetch(url, { headers });
         if (!response.ok) {
           throw new Error(`HTTP error! status: ${response.status}`);
         }
@@ -50,7 +79,7 @@ export default function TrackList() {
       }
     };
     fetchTracks();
-  }, []); // 初回マウント時のみ実行
+  }, [viewMode, user]); // viewMode or user が変わったら再フェッチ
 
   const handleDelete = async (trackId: number, uploaderUid: string) => {
     if (!user || user.uid !== uploaderUid) {
@@ -86,14 +115,72 @@ export default function TrackList() {
     }
   };
 
+  const handleLike = async (trackId: number) => {
+    if (!user) {
+      alert("Please login to like tracks! 💖");
+      return;
+    }
+
+    try {
+      const idToken = await user.getIdToken();
+      const response = await fetch(`/api/track/${trackId}/like`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${idToken}`,
+        },
+      });
+
+      if (!response.ok) throw new Error("Failed to like track");
+
+      const data = await response.json();
+      
+      if (viewMode === 'favorites' && !data.is_liked) {
+        // お気に入りビューで「いいね」を解除した場合、リストから削除する
+        setTracks(tracks.filter(track => track.id !== trackId));
+      } else {
+        setTracks(tracks.map(track => 
+          track.id === trackId 
+            ? { ...track, likes_count: data.likes_count, is_liked: data.is_liked }
+            : track
+        ));
+      }
+    } catch (err: any) {
+      console.error("Error liking track:", err);
+    }
+  };
 
   if (loading) return <p className="text-gyaru-pink text-center text-lg mt-8">Loading tracks...</p>;
   if (error) return <p className="text-red-500 text-center text-lg mt-8">Error: {error}</p>;
 
   return (
-    <div className="mt-8"> {/* Main container for the track list */}
-      {tracks.length === 0 ? (
-        <p className="text-gray-400 text-center text-lg mt-8">No tracks uploaded yet. Be the first to upload one!</p>
+    <div className="mt-8">
+      {/* タブ切り替えUI */}
+      <div className="flex justify-center mb-6 border-b border-gray-700">
+        <button
+          onClick={() => setViewMode('all')}
+          className={`px-6 py-3 text-lg font-bold transition-colors ${
+            viewMode === 'all'
+              ? 'text-gyaru-pink border-b-2 border-gyaru-pink'
+              : 'text-gray-400 hover:text-white'
+          }`}
+        >
+          All Tracks
+        </button>
+        {user && (
+          <button
+            onClick={() => setViewMode('favorites')}
+            className={`px-6 py-3 text-lg font-bold transition-colors ${
+              viewMode === 'favorites'
+                ? 'text-gyaru-pink border-b-2 border-gyaru-pink'
+                : 'text-gray-400 hover:text-white'
+            }`}
+          >
+            My Favorites 💖
+          </button>
+        )}
+      </div>
+      {tracks.length === 0 && !loading ? (
+        <p className="text-gray-400 text-center text-lg mt-8">{viewMode === 'favorites' ? 'You have no favorite tracks yet. 💖' : 'No tracks uploaded yet. Be the first to upload one!'}</p>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"> {/* Responsive grid */}
           {tracks.map((track) => (
@@ -113,6 +200,14 @@ export default function TrackList() {
                 <audio controls src={getTrackUrl(track.filename)} className="w-full">
                   Your browser does not support the audio element.
                 </audio>
+                
+                <div className="mt-3 flex items-center">
+                  <button onClick={() => handleLike(track.id)} className={`flex items-center space-x-2 px-3 py-2 rounded-full transition-colors ${track.is_liked ? 'bg-gyaru-pink/20 text-gyaru-pink' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}>
+                    <span className="text-xl">{track.is_liked ? '💖' : '🤍'}</span>
+                    <span className="font-bold">{track.likes_count || 0}</span>
+                  </button>
+                </div>
+
                 {user && user.uid === track.uploader_uid && (
                   <button 
                     onClick={() => handleDelete(track.id, track.uploader_uid)} 
