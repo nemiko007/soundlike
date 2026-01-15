@@ -80,11 +80,13 @@ func main() {
 	// === SQLiteデータベースの初期化 ===
 	dataDir := "./data"
 	if _, err := os.Stat(dataDir); os.IsNotExist(err) {
-		if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		// 0700: 所有者のみが読み書き実行可能 (外部からのアクセスを遮断)
+		if err := os.MkdirAll(dataDir, 0o700); err != nil {
 			log.Fatalf("error creating data directory: %v\n", err)
 		}
 	}
-	db, err = sql.Open("sqlite3", filepath.Join(dataDir, "soundlike.db"))
+	// 2. SQLiteのWALモードを有効化 (同時書き込み性能の向上とロックエラー防止)
+	db, err = sql.Open("sqlite3", filepath.Join(dataDir, "soundlike.db?_journal_mode=WAL"))
 	if err != nil {
 		log.Fatalf("error opening database: %v\n", err)
 	}
@@ -130,6 +132,24 @@ func main() {
 	e := echo.New()
 	e.Use(middleware.Logger())
 	e.Use(middleware.Recover())
+
+	// 1. セキュリティヘッダーの追加 (XSS, HSTS, Sniffing対策)
+	// 4. CSPを追加して、万が一のXSSリスクをさらに低減
+	e.Use(middleware.SecureWithConfig(middleware.SecureConfig{
+		XSSProtection:         "1; mode=block",
+		ContentTypeNosniff:    "nosniff",
+		XFrameOptions:         "DENY",
+		ContentSecurityPolicy: "default-src 'none'; img-src 'self'; media-src 'self'; style-src 'unsafe-inline';", // APIサーバーなので厳格に
+	}))
+
+	// 2. レートリミット (簡易的なメモリ保存: 1秒あたり20リクエストまで)
+	e.Use(middleware.RateLimiter(middleware.NewRateLimiterMemoryStore(20)))
+
+	// 3. タイムアウト設定 (30秒でタイムアウト) - Slowloris対策
+	e.Use(middleware.TimeoutWithConfig(middleware.TimeoutConfig{
+		Timeout: 30 * time.Second,
+	}))
+
 	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
 		// localhostと、デプロイされたフロントエンドのURLを許可します。
 		// "https://frontend-xxxx.onrender.com" の部分はご自身のフロントエンドのURLに置き換えてください。
@@ -174,7 +194,8 @@ func main() {
 			args = append(args, uploaderUID)
 		}
 
-		queryBuilder.WriteString(" ORDER BY t.created_at DESC")
+		// 1. 全件取得によるサーバークラッシュ防止 (LIMIT制限)
+		queryBuilder.WriteString(" ORDER BY t.created_at DESC LIMIT 50")
 
 		rows, err := db.Query(queryBuilder.String(), args...)
 		if err != nil {
@@ -211,30 +232,85 @@ func main() {
 		user := c.Get("user").(*auth.Token)
 		log.Printf("File upload attempt by user: %s", user.UID)
 
+		// リクエストボディのサイズ制限 (例: 20MB)
+		// ファイル(15MB) + メタデータ分を考慮
+		c.Request().Body = http.MaxBytesReader(c.Response(), c.Request().Body, 20<<20)
+
+		// 1. セキュリティ強化: メール未認証のユーザーによる書き込みをバックエンドでも拒否
+		if verified, ok := user.Claims["email_verified"].(bool); !ok || !verified {
+			return c.JSON(http.StatusForbidden, map[string]string{"message": "Email verification is required to upload."})
+		}
+
+		// トークンから表示名を取得し、設定されているか確認する
+		uploaderName, ok := user.Claims["name"].(string)
+		if !ok || uploaderName == "" {
+			return c.JSON(http.StatusForbidden, map[string]string{"message": "You must set a display name before uploading."})
+		}
+
 		// フォームからメタデータを取得
 		title := c.FormValue("title")
 		artist := c.FormValue("artist")
 		lyrics := c.FormValue("lyrics")
-		uploaderName := c.FormValue("uploader_name") // フロントエンドから送信された名前を取得
 
 		if title == "" {
-			return c.JSON(http.StatusBadRequest, "Title is required")
+			return c.JSON(http.StatusBadRequest, map[string]string{"message": "Title is required"})
+		}
+		// 入力値の長さ制限
+		if len(title) > 100 {
+			return c.JSON(http.StatusBadRequest, map[string]string{"message": "Title is too long (max 100 chars)"})
+		}
+		if len(artist) > 100 {
+			return c.JSON(http.StatusBadRequest, map[string]string{"message": "Artist name is too long (max 100 chars)"})
+		}
+		if len(lyrics) > 10000 {
+			return c.JSON(http.StatusBadRequest, map[string]string{"message": "Lyrics are too long (max 10000 chars)"})
 		}
 
 		file, err := c.FormFile("file")
 		if err != nil {
-			return c.JSON(http.StatusBadRequest, "Error retrieving the file")
+			return c.JSON(http.StatusBadRequest, map[string]string{"message": "Error retrieving the file"})
+		}
+
+		// ファイルサイズチェック (例: 15MB)
+		if file.Size > 15*1024*1024 {
+			return c.JSON(http.StatusBadRequest, map[string]string{"message": "File is too large (max 15MB)"})
+		}
+
+		// 拡張子チェック
+		ext := strings.ToLower(filepath.Ext(file.Filename))
+		if ext != ".mp3" {
+			return c.JSON(http.StatusBadRequest, map[string]string{"message": "Only .mp3 files are allowed"})
 		}
 
 		src, err := file.Open()
 		if err != nil {
-			return c.JSON(http.StatusInternalServerError, "Error opening the file")
+			return c.JSON(http.StatusInternalServerError, map[string]string{"message": "Error opening the file"})
 		}
 		defer src.Close()
 
-		// ファイル名をUUIDでユニーク化
-		originalFileName := filepath.Base(file.Filename)
-		uniqueFileName := uuid.New().String() + "_" + originalFileName
+		// MIMEタイプチェック (簡易的なマジックナンバーチェック)
+		// 先頭の512バイトを読み込んで判定する
+		buffer := make([]byte, 512)
+		_, err = src.Read(buffer)
+		if err != nil && err != io.EOF {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"message": "Error checking file type"})
+		}
+		// ファイルポインタを先頭に戻す
+		if _, err := src.Seek(0, 0); err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"message": "Error processing file"})
+		}
+
+		contentType := http.DetectContentType(buffer)
+		// 明らかに危険なタイプ（HTML, JS, XMLなど）を拒否する
+		// MP3は "application/octet-stream" や "audio/mpeg" と判定されることが多い
+		if strings.Contains(contentType, "text/") || strings.Contains(contentType, "application/javascript") || strings.Contains(contentType, "application/json") || strings.Contains(contentType, "application/xml") {
+			log.Printf("Rejected file type: %s", contentType)
+			return c.JSON(http.StatusBadRequest, map[string]string{"message": "Invalid file type detected"})
+		}
+
+		// 3. ファイル名の安全性確保: ディスク上ではUUIDのみを使用し、元のファイル名に依存しない
+		// (元のファイル名に含まれる特殊文字や長さによるファイルシステムエラーを防止)
+		uniqueFileName := uuid.New().String() + ".mp3"
 
 		dstPath := filepath.Join("uploads", uniqueFileName)
 
@@ -249,15 +325,18 @@ func main() {
 		}
 
 		// データベースにメタデータを保存
+		// filenameカラムには uniqueFileName (uuid.mp3) が入るため、フロントエンドからのアクセスURLも安全になる
 		insertSQL := `INSERT INTO tracks (filename, title, artist, lyrics, uploader_uid, uploader_name) VALUES (?, ?, ?, ?, ?, ?)`
 		_, err = db.Exec(insertSQL, uniqueFileName, title, artist, lyrics, user.UID, uploaderName)
 		if err != nil {
 			log.Printf("error inserting track metadata: %v\n", err)
-			// ファイルは保存されたがDB登録失敗した場合は、保存したファイルも削除するべきだが、今回は簡易化
-			return c.JSON(http.StatusInternalServerError, map[string]string{"message": "Error saving track metadata: " + err.Error()})
+			// 4. ゴミファイル対策: DB保存失敗時はファイルを削除する
+			os.Remove(dstPath)
+			// 5. 情報漏洩対策: 内部エラー詳細(err.Error())をクライアントに返さない
+			return c.JSON(http.StatusInternalServerError, map[string]string{"message": "Internal server error during metadata saving."})
 		}
 
-		return c.JSON(http.StatusOK, map[string]string{"message": "File " + originalFileName + " and metadata uploaded successfully with ID " + uniqueFileName + "!"})
+		return c.JSON(http.StatusOK, map[string]string{"message": "File uploaded successfully!"})
 	})
 
 	// ProfileUpdateRequest defines the structure for the profile update request
@@ -274,9 +353,17 @@ func main() {
 			return c.JSON(http.StatusBadRequest, map[string]string{"message": "Invalid request body"})
 		}
 
+		// メール未認証ならプロフィール更新も禁止
+		if verified, ok := user.Claims["email_verified"].(bool); !ok || !verified {
+			return c.JSON(http.StatusForbidden, map[string]string{"message": "Email verification is required to update profile."})
+		}
+
 		newDisplayName := strings.TrimSpace(req.DisplayName)
 		if newDisplayName == "" {
 			return c.JSON(http.StatusBadRequest, map[string]string{"message": "Display name cannot be empty"})
+		}
+		if len(newDisplayName) > 30 {
+			return c.JSON(http.StatusBadRequest, map[string]string{"message": "Display name is too long (max 30 chars)"})
 		}
 
 		// 表示名の重複をチェック (自分以外のユーザーが使っていないか)
@@ -328,7 +415,8 @@ func main() {
 		FROM tracks t
 		INNER JOIN likes l ON t.id = l.track_id
 		WHERE l.user_uid = ?
-		ORDER BY l.created_at DESC`
+		ORDER BY l.created_at DESC
+		LIMIT 50` // お気に入り一覧もLIMITで保護
 
 		rows, err := db.Query(query, user.UID)
 		if err != nil {
@@ -363,17 +451,35 @@ func main() {
 			return c.JSON(http.StatusBadRequest, "Invalid track ID")
 		}
 
-		// 既にいいねしているかチェック
+		// メール未認証ならいいねも禁止
+		if verified, ok := user.Claims["email_verified"].(bool); !ok || !verified {
+			return c.JSON(http.StatusForbidden, map[string]string{"message": "Email verification is required to like tracks."})
+		}
+
+		// 2. DB整合性強化: トランザクションを開始
+		tx, err := db.Begin()
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, "Database transaction error")
+		}
+		defer tx.Rollback() // エラー時はロールバック
+
+		// トランザクション内でチェック
 		var exists bool
-		err = db.QueryRow("SELECT EXISTS(SELECT 1 FROM likes WHERE user_uid = ? AND track_id = ?)", user.UID, trackID).Scan(&exists)
+		err = tx.QueryRow("SELECT EXISTS(SELECT 1 FROM likes WHERE user_uid = ? AND track_id = ?)", user.UID, trackID).Scan(&exists)
 		if err != nil {
 			return c.JSON(http.StatusInternalServerError, "Database error")
 		}
 
 		if exists {
-			_, err = db.Exec("DELETE FROM likes WHERE user_uid = ? AND track_id = ?", user.UID, trackID)
+			_, err = tx.Exec("DELETE FROM likes WHERE user_uid = ? AND track_id = ?", user.UID, trackID)
 		} else {
-			_, err = db.Exec("INSERT INTO likes (user_uid, track_id) VALUES (?, ?)", user.UID, trackID)
+			_, err = tx.Exec("INSERT INTO likes (user_uid, track_id) VALUES (?, ?)", user.UID, trackID)
+		}
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, "Failed to update likes")
+		}
+		if err := tx.Commit(); err != nil { // コミット実行
+			return c.JSON(http.StatusInternalServerError, "Failed to commit transaction")
 		}
 
 		// 更新後のカウントと状態を返す
@@ -405,27 +511,93 @@ func main() {
 			return c.JSON(http.StatusForbidden, "You are not authorized to delete this track")
 		}
 
-		// ファイルを削除
-		filePath := filepath.Join("uploads", track.Filename)
-		if err := os.Remove(filePath); err != nil {
-			log.Printf("error deleting file %s: %v\n", filePath, err)
-			return c.JSON(http.StatusInternalServerError, "Error deleting track file")
-		}
-
-		// 関連するいいねを削除
-		if _, err := db.Exec("DELETE FROM likes WHERE track_id = ?", trackID); err != nil {
-			log.Printf("error deleting likes for track %d: %v\n", trackID, err)
-			// 致命的なエラーではないので続行
-		}
-
-		// DBからレコードを削除
-		_, err = db.Exec("DELETE FROM tracks WHERE id = ?", trackID)
+		// 3. DB整合性強化: 削除処理もトランザクション化
+		tx, err := db.Begin()
 		if err != nil {
-			log.Printf("error deleting track from DB: %v\n", err)
+			return c.JSON(http.StatusInternalServerError, "Database transaction error")
+		}
+		defer tx.Rollback()
+
+		// 先にDBから関連データを削除
+		if _, err := tx.Exec("DELETE FROM likes WHERE track_id = ?", trackID); err != nil {
+			return c.JSON(http.StatusInternalServerError, "Error deleting likes")
+		}
+		if _, err := tx.Exec("DELETE FROM tracks WHERE id = ?", trackID); err != nil {
 			return c.JSON(http.StatusInternalServerError, "Error deleting track metadata")
 		}
 
+		// DBコミット
+		if err := tx.Commit(); err != nil {
+			return c.JSON(http.StatusInternalServerError, "Failed to commit deletion")
+		}
+
+		// DB削除が確定した後にファイルを削除 (不整合防止)
+		filePath := filepath.Join("uploads", track.Filename)
+		if err := os.Remove(filePath); err != nil {
+			// ファイル削除に失敗してもDBからは消えているため、システムとしての整合性は保たれる
+			// (ゴミファイルは残るが、ユーザーには影響しない)
+			log.Printf("warning: failed to delete file %s after db deletion: %v\n", filePath, err)
+		}
+
 		return c.JSON(http.StatusOK, map[string]string{"message": "Track deleted successfully!"})
+	})
+
+	// アカウント削除API
+	apiGroup.DELETE("/account", func(c echo.Context) error {
+		user := c.Get("user").(*auth.Token)
+		uid := user.UID
+
+		// トランザクション開始
+		tx, err := db.Begin()
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, "Database transaction error")
+		}
+		defer tx.Rollback()
+
+		// 1. ユーザーがアップロードしたトラックのファイル名を取得 (ファイル削除用)
+		rows, err := tx.Query("SELECT filename FROM tracks WHERE uploader_uid = ?", uid)
+		if err != nil {
+			log.Printf("error querying user tracks for deletion: %v\n", err)
+			return c.JSON(http.StatusInternalServerError, "Error querying user tracks")
+		}
+		var filenames []string
+		for rows.Next() {
+			var fname string
+			if err := rows.Scan(&fname); err == nil {
+				filenames = append(filenames, fname)
+			}
+		}
+		rows.Close()
+
+		// 2. ユーザーが行った「いいね」を削除
+		if _, err := tx.Exec("DELETE FROM likes WHERE user_uid = ?", uid); err != nil {
+			return c.JSON(http.StatusInternalServerError, "Error deleting user likes")
+		}
+
+		// 3. ユーザーのトラックについた「いいね」を削除
+		if _, err := tx.Exec("DELETE FROM likes WHERE track_id IN (SELECT id FROM tracks WHERE uploader_uid = ?)", uid); err != nil {
+			return c.JSON(http.StatusInternalServerError, "Error deleting likes on user tracks")
+		}
+
+		// 4. トラック情報を削除
+		if _, err := tx.Exec("DELETE FROM tracks WHERE uploader_uid = ?", uid); err != nil {
+			return c.JSON(http.StatusInternalServerError, "Error deleting user tracks")
+		}
+
+		// コミット
+		if err := tx.Commit(); err != nil {
+			return c.JSON(http.StatusInternalServerError, "Failed to commit account deletion")
+		}
+
+		// 5. 物理ファイルを削除 (DB削除成功後)
+		for _, fname := range filenames {
+			filePath := filepath.Join("uploads", fname)
+			if err := os.Remove(filePath); err != nil {
+				log.Printf("warning: failed to delete file %s: %v", filePath, err)
+			}
+		}
+
+		return c.JSON(http.StatusOK, map[string]string{"message": "Account data deleted successfully."})
 	})
 
 	e.Logger.Fatal(e.Start(":8080"))
