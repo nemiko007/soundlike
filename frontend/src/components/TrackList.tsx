@@ -16,6 +16,15 @@ interface Track {
   is_liked?: boolean;
 }
 
+interface Comment {
+  id: number;
+  track_id: number;
+  user_uid: string;
+  user_name: string;
+  content: string;
+  created_at: string;
+}
+
 interface ViewState {
   mode: 'all' | 'favorites' | 'user';
   uid?: string;
@@ -32,6 +41,11 @@ export default function TrackList() {
   const [error, setError] = useState<string | null>(null);
   const [user, setUser] = useState<FirebaseAuthUser | null>(null); // ログイン中のユーザー情報
   const [view, setView] = useState<ViewState>({ mode: 'all' });
+  const [isFollowing, setIsFollowing] = useState<boolean>(false);
+  const [activeCommentTrackId, setActiveCommentTrackId] = useState<number | null>(null);
+  const [comments, setComments] = useState<Comment[]>([]);
+  const [commentInput, setCommentInput] = useState<string>("");
+  const [loadingComments, setLoadingComments] = useState<boolean>(false);
 
   // ユーザーの認証状態を監視
   useEffect(() => {
@@ -88,6 +102,29 @@ export default function TrackList() {
     };
     fetchTracks();
   }, [view, user]); // view or user が変わったら再フェッチ
+
+  // フォロー状態の確認 (ユーザー表示モード時)
+  useEffect(() => {
+    const checkFollow = async () => {
+      if (view.mode === 'user' && view.uid && user && user.uid !== view.uid) {
+        try {
+          const idToken = await user.getIdToken();
+          const res = await fetch(`/api/user/${view.uid}/follow/status`, {
+            headers: { Authorization: `Bearer ${idToken}` },
+          });
+          if (res.ok) {
+            const data = await res.json();
+            setIsFollowing(data.is_following);
+          }
+        } catch (e) {
+          console.error("Error checking follow status", e);
+        }
+      } else {
+        setIsFollowing(false);
+      }
+    };
+    checkFollow();
+  }, [view, user]);
 
   const handleDelete = async (trackId: number, uploaderUid: string) => {
     if (!user || user.uid !== uploaderUid) {
@@ -163,6 +200,106 @@ export default function TrackList() {
     setView({ mode: 'user', uid, name: name || 'Anonymous' });
   };
 
+  const handleFollowToggle = async () => {
+    if (!user || !view.uid) {
+      alert("Please login to follow users.");
+      return;
+    }
+    try {
+      const idToken = await user.getIdToken();
+      const res = await fetch(`/api/user/${view.uid}/follow`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${idToken}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setIsFollowing(data.is_following);
+        alert(data.message);
+      } else {
+        const err = await res.json();
+        alert(err.message || "Failed to update follow status");
+      }
+    } catch (e) {
+      console.error(e);
+      alert("Error updating follow status");
+    }
+  };
+
+  const fetchComments = async (trackId: number) => {
+    setLoadingComments(true);
+    try {
+      const res = await fetch(`/api/track/${trackId}/comments`);
+      if (res.ok) {
+        const data = await res.json();
+        setComments(data);
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setLoadingComments(false);
+    }
+  };
+
+  const toggleComments = (trackId: number) => {
+    if (activeCommentTrackId === trackId) {
+      setActiveCommentTrackId(null);
+      setComments([]);
+    } else {
+      setActiveCommentTrackId(trackId);
+      fetchComments(trackId);
+    }
+  };
+
+  const handlePostComment = async (trackId: number) => {
+    if (!user) {
+      alert("Please login to comment.");
+      return;
+    }
+    if (!commentInput.trim()) return;
+
+    try {
+      const idToken = await user.getIdToken();
+      const res = await fetch(`/api/track/${trackId}/comment`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${idToken}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ content: commentInput })
+      });
+      
+      if (res.ok) {
+        setCommentInput("");
+        fetchComments(trackId);
+      } else {
+        const data = await res.json();
+        alert(data.message || "Failed to post comment");
+      }
+    } catch (e) {
+      console.error(e);
+      alert("Error posting comment");
+    }
+  };
+
+  const handleDeleteComment = async (commentId: number) => {
+    if (!confirm("Delete this comment?")) return;
+    if (!user) return;
+    try {
+      const idToken = await user.getIdToken();
+      const res = await fetch(`/api/comment/${commentId}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${idToken}` }
+      });
+      if (res.ok) {
+        if (activeCommentTrackId) fetchComments(activeCommentTrackId);
+      } else {
+        alert("Failed to delete comment");
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
   if (loading) return <p className="text-gyaru-pink text-center text-lg mt-8">Loading tracks...</p>;
   if (error) return <p className="text-red-500 text-center text-lg mt-8">Error: {error}</p>;
 
@@ -196,9 +333,20 @@ export default function TrackList() {
         </div>
         {view.mode === 'user' && (
           <div className="text-center mt-4 p-2 bg-gyaru-pink/10 rounded-lg">
-            <h3 className="text-md text-gray-300">
+            <h3 className="text-md text-gray-300 mb-2">
               Showing tracks by: <span className="font-bold text-gyaru-pink">{view.name}</span>
             </h3>
+            {user && user.uid !== view.uid && (
+              <button
+                onClick={handleFollowToggle}
+                className={`px-4 py-1 rounded-full text-sm font-bold transition-colors mb-2 ${
+                  isFollowing ? 'bg-gray-600 text-white hover:bg-gray-500' : 'bg-gyaru-pink text-white hover:bg-gyaru-pink/80'
+                }`}
+              >
+                {isFollowing ? 'Unfollow' : 'Follow'}
+              </button>
+            )}
+            <br />
             <button onClick={() => setView({ mode: 'all' })} className="text-sm text-gyaru-pink hover:underline">
               (Show All Tracks)
             </button>
@@ -242,12 +390,55 @@ export default function TrackList() {
                   Your browser does not support the audio element.
                 </audio>
                 
-                <div className="mt-3 flex items-center">
+                <div className="mt-3 flex items-center space-x-4">
                   <button onClick={() => handleLike(track.id)} className={`flex items-center space-x-2 px-3 py-2 rounded-full transition-colors ${track.is_liked ? 'bg-gyaru-pink/20 text-gyaru-pink' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}>
                     <span className="text-xl">{track.is_liked ? '💖' : '🤍'}</span>
                     <span className="font-bold">{track.likes_count || 0}</span>
                   </button>
+                  <button onClick={() => toggleComments(track.id)} className="flex items-center space-x-2 px-3 py-2 rounded-full bg-gray-800 text-gray-400 hover:bg-gray-700 transition-colors">
+                    <span className="text-xl">💬</span>
+                    <span className="font-bold text-sm">Comments</span>
+                  </button>
                 </div>
+
+                {/* Comments Section */}
+                {activeCommentTrackId === track.id && (
+                  <div className="mt-4 bg-gray-900/50 p-4 rounded-lg border border-gray-700">
+                    <h4 className="text-gyaru-pink font-bold mb-3">Comments</h4>
+                    {loadingComments ? (
+                      <p className="text-gray-500 text-sm">Loading...</p>
+                    ) : comments.length === 0 ? (
+                      <p className="text-gray-500 text-sm mb-3">No comments yet.</p>
+                    ) : (
+                      <div className="space-y-3 mb-4 max-h-48 overflow-y-auto">
+                        {comments.map((comment) => (
+                          <div key={comment.id} className="bg-gray-800 p-2 rounded text-sm">
+                            <div className="flex justify-between items-start">
+                              <span className="font-bold text-gyaru-pink/80">{comment.user_name}</span>
+                              <span className="text-xs text-gray-500">{new Date(comment.created_at).toLocaleDateString()}</span>
+                            </div>
+                            <p className="text-gray-300 mt-1">{comment.content}</p>
+                            {user && user.uid === comment.user_uid && (
+                              <button onClick={() => handleDeleteComment(comment.id)} className="text-xs text-red-400 hover:underline mt-1">Delete</button>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {user && (
+                      <div className="flex gap-2">
+                        <input
+                          type="text"
+                          value={commentInput}
+                          onChange={(e) => setCommentInput(e.target.value)}
+                          placeholder="Write a comment..."
+                          className="flex-1 p-2 bg-gray-800 border border-gray-600 rounded text-sm text-white focus:border-gyaru-pink focus:outline-none"
+                        />
+                        <button onClick={() => handlePostComment(track.id)} className="px-3 py-1 bg-gyaru-pink text-white rounded text-sm font-bold hover:bg-gyaru-pink/80">Post</button>
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 {user && user.uid === track.uploader_uid && (
                   <button 

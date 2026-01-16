@@ -27,6 +27,7 @@ export default function Login() {
   const [lyrics, setLyrics] = useState<string>("");
   const [displayName, setDisplayName] = useState("");
   const [isLoginMode, setIsLoginMode] = useState(true);
+  const [emailNotifications, setEmailNotifications] = useState(true);
   const lastUidRef = useRef<string | null>(null);
 
   // ユーザーの認証状態を監視し、userステートを更新する
@@ -92,6 +93,27 @@ export default function Login() {
         setLyrics("");
       }
     }
+  }, [user]);
+
+  // ログイン時に通知設定を取得
+  useEffect(() => {
+    const fetchSettings = async () => {
+      if (user) {
+        try {
+          const idToken = await user.getIdToken();
+          const res = await fetch("/api/settings", {
+            headers: { Authorization: `Bearer ${idToken}` },
+          });
+          if (res.ok) {
+            const data = await res.json();
+            setEmailNotifications(data.email_notifications);
+          }
+        } catch (e) {
+          console.error("Failed to fetch settings", e);
+        }
+      }
+    };
+    fetchSettings();
   }, [user]);
 
   const handleAuthAction = async () => {
@@ -165,6 +187,26 @@ export default function Login() {
       setMessage(data.message);
     } catch (e: any) {
       setError(e.message);
+    }
+  };
+
+  const handleNotificationChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const newValue = e.target.checked;
+    setEmailNotifications(newValue);
+    if (!user) return;
+
+    try {
+      const idToken = await user.getIdToken();
+      await fetch("/api/settings", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${idToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ email_notifications: newValue }),
+      });
+    } catch (error) {
+      console.error("Failed to update notification settings", error);
     }
   };
 
@@ -324,6 +366,13 @@ export default function Login() {
                   <input type="text" value={displayName} onChange={(e) => setDisplayName(e.target.value)} className="p-2 bg-gray-800 text-white border border-gray-600 rounded-md w-full focus:ring-gyaru-pink focus:border-gyaru-pink" placeholder="Your Name" />
                 </div>
                 <button onClick={handleUpdateProfile} className="w-full py-2 px-4 bg-gray-700 hover:bg-gray-600 rounded-md text-white font-bold transition-colors">Update Profile</button>
+                
+                <div className="pt-2">
+                  <label className="flex items-center space-x-2 cursor-pointer">
+                    <input type="checkbox" checked={emailNotifications} onChange={handleNotificationChange} className="form-checkbox h-5 w-5 text-gyaru-pink rounded border-gray-600 bg-gray-800 focus:ring-gyaru-pink" />
+                    <span className="text-sm text-gray-300">Receive email notifications (likes, comments, new tracks)</span>
+                  </label>
+                </div>
               </div>
 
               <div className="border-t border-b border-gray-700 py-6 my-4 space-y-4"> {/* Adjusted padding */}

@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"database/sql"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/smtp"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -32,6 +35,16 @@ type Track struct {
 	CreatedAt    time.Time `json:"created_at"`
 	LikesCount   int       `json:"likes_count"`
 	IsLiked      bool      `json:"is_liked"`
+}
+
+// Comment構造体
+type Comment struct {
+	ID        int       `json:"id"`
+	TrackID   int       `json:"track_id"`
+	UserUID   string    `json:"user_uid"`
+	UserName  string    `json:"user_name"`
+	Content   string    `json:"content"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // firebaseAuthMiddleware は、リクエストヘッダーからIDトークンを検証するミドルウェア
@@ -68,10 +81,108 @@ func firebaseAuthMiddleware(app *firebase.App) echo.MiddlewareFunc {
 
 var db *sql.DB // グローバル変数としてデータベース接続を保持
 
+// SMTPConfig はメール送信設定を保持する構造体
+type SMTPConfig struct {
+	Host     string
+	Port     string
+	User     string
+	Password string
+	From     string
+}
+
+var smtpConfig SMTPConfig
+
+// loadEnv は.envファイルが存在する場合に読み込んで環境変数をセットする
+func loadEnv() {
+	file, err := os.Open(".env")
+	if err != nil {
+		log.Printf("Info: .env file not found or could not be opened: %v. Using system environment variables.", err)
+		return // .envがない場合は何もしない
+	}
+	log.Println("Info: Loading environment variables from .env file.")
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		// コメントや空行をスキップ
+		if strings.TrimSpace(line) == "" || strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) == 2 {
+			key := strings.TrimSpace(parts[0])
+			value := strings.TrimSpace(parts[1])
+			// クォート除去 (簡易的)
+			if len(value) > 1 && (value[0] == '"' || value[0] == '\'') && value[0] == value[len(value)-1] {
+				value = value[1 : len(value)-1]
+			}
+			os.Setenv(key, value)
+		}
+	}
+}
+
+// sendEmail はSMTPを使用してメールを送信するヘルパー関数
+func sendEmail(to []string, subject, body string) error {
+	if smtpConfig.Host == "" || smtpConfig.Port == "" || smtpConfig.User == "" || smtpConfig.Password == "" {
+		// 設定がない場合はログを出してスキップ（開発環境などでエラーにならないように）
+		log.Println("SMTP configuration missing, skipping email sending.")
+		return nil
+	}
+
+	auth := smtp.PlainAuth("", smtpConfig.User, smtpConfig.Password, smtpConfig.Host)
+
+	msg := []byte(fmt.Sprintf("From: SoundLike <%s>\r\nTo: %s\r\nSubject: %s\r\nMIME-Version: 1.0\r\nContent-Type: text/html; charset=\"UTF-8\"\r\n\r\n%s", smtpConfig.From, strings.Join(to, ","), subject, body))
+	addr := fmt.Sprintf("%s:%s", smtpConfig.Host, smtpConfig.Port)
+
+	// 送信元(from)を設定して送信
+	return smtp.SendMail(addr, auth, smtpConfig.From, to, msg)
+}
+
+// shouldNotify は指定されたユーザーがメール通知を許可しているかを確認する
+func shouldNotify(uid string) bool {
+	var enabled bool
+	// レコードが存在しない場合はデフォルトで true (通知ON) とする
+	err := db.QueryRow("SELECT email_notifications FROM user_settings WHERE user_uid = ?", uid).Scan(&enabled)
+	if err == sql.ErrNoRows {
+		return true
+	}
+	if err != nil {
+		log.Printf("Error checking notification settings for %s: %v", uid, err)
+		return true // エラー時はデフォルトで許可
+	}
+	return enabled
+}
+
 func main() {
 	ctx := context.Background()
 	// render.yamlで設定したGOOGLE_APPLICATION_CREDENTIALS環境変数を自動的に読み込むようにするため、
 	// 明示的なファイルパス指定を削除します。
+
+	// .envファイルを読み込む (開発環境用)
+	loadEnv()
+
+	// フロントエンドのURLを取得 (メール通知用リンク)
+	frontendURL := os.Getenv("FRONTEND_URL")
+	if frontendURL == "" {
+		frontendURL = "http://localhost:3000"
+	}
+
+	// SMTP設定を初期化
+	smtpConfig = SMTPConfig{
+		Host:     os.Getenv("SMTP_HOST"),
+		Port:     os.Getenv("SMTP_PORT"),
+		User:     os.Getenv("SMTP_USER"),
+		Password: os.Getenv("SMTP_PASSWORD"),
+		From:     os.Getenv("SMTP_FROM"),
+	}
+	if smtpConfig.From == "" {
+		smtpConfig.From = smtpConfig.User // FROMが未設定の場合はUSERを使用
+	}
+
+	// デバッグ用: 読み込まれたSMTP設定をログ出力 (パスワードは隠す)
+	log.Printf("SMTP Configuration loaded: Host='%s', Port='%s', User='%s', From='%s'", smtpConfig.Host, smtpConfig.Port, smtpConfig.User, smtpConfig.From)
+
 	app, err := firebase.NewApp(ctx, nil)
 	if err != nil {
 		log.Fatalf("error initializing app: %v\n", err)
@@ -122,10 +233,55 @@ func main() {
 		log.Fatalf("error creating likes table: %v\n", err)
 	}
 
+	// followsテーブルを作成
+	createFollowsTableSQL := `
+	CREATE TABLE IF NOT EXISTS follows (
+		follower_uid TEXT NOT NULL,
+		following_uid TEXT NOT NULL,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (follower_uid, following_uid)
+	);`
+	if _, err := db.Exec(createFollowsTableSQL); err != nil {
+		log.Fatalf("error creating follows table: %v\n", err)
+	}
+
+	// commentsテーブルを作成
+	createCommentsTableSQL := `
+	CREATE TABLE IF NOT EXISTS comments (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		track_id INTEGER NOT NULL,
+		user_uid TEXT NOT NULL,
+		user_name TEXT NOT NULL,
+		content TEXT NOT NULL,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);`
+	if _, err := db.Exec(createCommentsTableSQL); err != nil {
+		log.Fatalf("error creating comments table: %v\n", err)
+	}
+
+	// user_settingsテーブルを作成 (通知設定など)
+	createUserSettingsTableSQL := `
+	CREATE TABLE IF NOT EXISTS user_settings (
+		user_uid TEXT PRIMARY KEY,
+		email_notifications BOOLEAN DEFAULT TRUE,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);`
+	if _, err := db.Exec(createUserSettingsTableSQL); err != nil {
+		log.Fatalf("error creating user_settings table: %v\n", err)
+	}
+
 	// 既存のテーブルに uploader_name カラムがない場合に追加するための処理（簡易マイグレーション）
-	// エラーが発生しても（カラムが既に存在するなど）、ログを出して続行します
-	if _, err := db.Exec("ALTER TABLE tracks ADD COLUMN uploader_name TEXT"); err != nil {
-		log.Println("Info: uploader_name column might already exist or could not be added:", err)
+	var colExists int
+	// pragma_table_infoを使ってカラムの存在を確認する
+	if err := db.QueryRow("SELECT COUNT(*) FROM pragma_table_info('tracks') WHERE name='uploader_name'").Scan(&colExists); err != nil {
+		log.Printf("Warning: could not check schema for uploader_name: %v", err)
+	} else if colExists == 0 {
+		// カラムが存在しない場合のみ追加を実行
+		if _, err := db.Exec("ALTER TABLE tracks ADD COLUMN uploader_name TEXT"); err != nil {
+			log.Printf("Error adding uploader_name column: %v\n", err)
+		} else {
+			log.Println("Migrated: Added uploader_name column to tracks table.")
+		}
 	}
 	log.Println("Database initialized successfully.")
 
@@ -150,10 +306,17 @@ func main() {
 		Timeout: 30 * time.Second,
 	}))
 
+	// CORS設定: 環境変数 ALLOWED_ORIGINS から許可するオリジンを追加
+	allowedOrigins := []string{"http://localhost:3000"}
+	if envOrigins := os.Getenv("ALLOWED_ORIGINS"); envOrigins != "" {
+		origins := strings.Split(envOrigins, ",")
+		for _, origin := range origins {
+			allowedOrigins = append(allowedOrigins, strings.TrimSpace(origin))
+		}
+	}
+
 	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
-		// localhostと、デプロイされたフロントエンドのURLを許可します。
-		// "https://frontend-xxxx.onrender.com" の部分はご自身のフロントエンドのURLに置き換えてください。
-		AllowOrigins: []string{"http://localhost:3000", "https://frontend-xxxx.onrender.com"},
+		AllowOrigins: allowedOrigins,
 		AllowHeaders: []string{echo.HeaderOrigin, echo.HeaderContentType, echo.HeaderAccept, echo.HeaderAuthorization},
 	}))
 
@@ -222,6 +385,30 @@ func main() {
 		}
 
 		return c.JSON(http.StatusOK, tracks)
+	})
+
+	// トラックのコメント一覧を取得するAPI
+	e.GET("/api/track/:id/comments", func(c echo.Context) error {
+		trackID, err := strconv.Atoi(c.Param("id"))
+		if err != nil {
+			return c.JSON(http.StatusBadRequest, "Invalid track ID")
+		}
+
+		rows, err := db.Query("SELECT id, track_id, user_uid, user_name, content, created_at FROM comments WHERE track_id = ? ORDER BY created_at ASC", trackID)
+		if err != nil {
+			log.Printf("error querying comments: %v\n", err)
+			return c.JSON(http.StatusInternalServerError, "Error retrieving comments")
+		}
+		defer rows.Close()
+
+		comments := make([]Comment, 0)
+		for rows.Next() {
+			var cm Comment
+			if err := rows.Scan(&cm.ID, &cm.TrackID, &cm.UserUID, &cm.UserName, &cm.Content, &cm.CreatedAt); err == nil {
+				comments = append(comments, cm)
+			}
+		}
+		return c.JSON(http.StatusOK, comments)
 	})
 
 	// --- 認証が必要な保護されたルートグループ ---
@@ -336,6 +523,53 @@ func main() {
 			return c.JSON(http.StatusInternalServerError, map[string]string{"message": "Internal server error during metadata saving."})
 		}
 
+		// --- フォロワーへのメール通知処理 (非同期) ---
+		go func(uploaderUID, uploaderName, trackTitle, frontendURL string) {
+			// アップロード者自身の通知設定は関係ないが、フォロワーへの通知なのでループ内でチェックする
+
+			// フォロワーのUIDを取得
+			rows, err := db.Query("SELECT follower_uid FROM follows WHERE following_uid = ?", uploaderUID)
+			if err != nil {
+				log.Printf("Error getting followers for notification: %v", err)
+				return
+			}
+			defer rows.Close()
+
+			authClient, err := app.Auth(context.Background())
+			if err != nil {
+				log.Printf("Error getting Auth client for notification: %v", err)
+				return
+			}
+
+			for rows.Next() {
+				var followerUID string
+				if err := rows.Scan(&followerUID); err == nil {
+					// 通知設定を確認
+					if !shouldNotify(followerUID) {
+						continue
+					}
+
+					// Firebase Authからメールアドレスを取得
+					userRecord, err := authClient.GetUser(context.Background(), followerUID)
+					if err == nil && userRecord.Email != "" {
+						subject := fmt.Sprintf("New track from %s! 🎵", uploaderName)
+						body := fmt.Sprintf(`
+							<h2>New track from %s! 🎵</h2>
+							<p>Hello!</p>
+							<p><strong>%s</strong> has uploaded a new track: "<strong>%s</strong>".</p>
+							<p><a href="%s">Check it out on SoundLike!</a></p>
+							<hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
+							<p style="font-size: 12px; color: #888;">Don't want these emails? <a href="%s" style="color: #888;">Unsubscribe</a> in your profile settings.</p>
+						`, uploaderName, uploaderName, trackTitle, frontendURL)
+						log.Printf("Sending upload notification to: %s", userRecord.Email)
+						if err := sendEmail([]string{userRecord.Email}, subject, body); err != nil {
+							log.Printf("Failed to send email to %s: %v", userRecord.Email, err)
+						}
+					}
+				}
+			}
+		}(user.UID, uploaderName, title, frontendURL)
+
 		return c.JSON(http.StatusOK, map[string]string{"message": "File uploaded successfully!"})
 	})
 
@@ -399,6 +633,48 @@ func main() {
 		}
 
 		return c.JSON(http.StatusOK, map[string]string{"message": "Profile updated successfully!"})
+	})
+
+	// 通知設定の取得API
+	apiGroup.GET("/settings", func(c echo.Context) error {
+		user := c.Get("user").(*auth.Token)
+		var enabled bool
+		err := db.QueryRow("SELECT email_notifications FROM user_settings WHERE user_uid = ?", user.UID).Scan(&enabled)
+		if err == sql.ErrNoRows {
+			// デフォルトはON
+			return c.JSON(http.StatusOK, map[string]bool{"email_notifications": true})
+		}
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, "Database error")
+		}
+		return c.JSON(http.StatusOK, map[string]bool{"email_notifications": enabled})
+	})
+
+	// 通知設定の更新API
+	type SettingsUpdateRequest struct {
+		EmailNotifications bool `json:"email_notifications"`
+	}
+	apiGroup.POST("/settings", func(c echo.Context) error {
+		user := c.Get("user").(*auth.Token)
+		var req SettingsUpdateRequest
+		if err := c.Bind(&req); err != nil {
+			return c.JSON(http.StatusBadRequest, "Invalid request")
+		}
+
+		// UPSERT (存在すれば更新、なければ挿入)
+		// SQLite 3.24.0+ であれば INSERT ... ON CONFLICT が使えるが、
+		// 互換性のため REPLACE INTO を使用するか、INSERT OR REPLACE を使用する
+		_, err := db.Exec(`
+			INSERT INTO user_settings (user_uid, email_notifications, updated_at) 
+			VALUES (?, ?, CURRENT_TIMESTAMP)
+			ON CONFLICT(user_uid) DO UPDATE SET 
+			email_notifications = excluded.email_notifications,
+			updated_at = CURRENT_TIMESTAMP`, user.UID, req.EmailNotifications)
+		if err != nil {
+			log.Printf("Error updating settings: %v", err)
+			return c.JSON(http.StatusInternalServerError, "Failed to update settings")
+		}
+		return c.JSON(http.StatusOK, map[string]string{"message": "Settings updated."})
 	})
 
 	// いいねしたトラック一覧を取得するAPI
@@ -482,10 +758,204 @@ func main() {
 			return c.JSON(http.StatusInternalServerError, "Failed to commit transaction")
 		}
 
+		// --- いいね通知処理 (非同期) ---
+		// 新規いいねの場合のみ通知
+		if !exists {
+			likerName, _ := user.Claims["name"].(string)
+			if likerName == "" {
+				likerName = "Someone"
+			}
+
+			go func(trackID int, likerName, likerUID, frontendURL string) {
+				var uploaderUID, trackTitle string
+				err := db.QueryRow("SELECT uploader_uid, title FROM tracks WHERE id = ?", trackID).Scan(&uploaderUID, &trackTitle)
+				if err != nil {
+					return
+				}
+
+				// 自分の投稿へのいいねなら通知しない
+				if uploaderUID == likerUID {
+					return
+				}
+
+				// 通知設定を確認
+				if !shouldNotify(uploaderUID) {
+					return
+				}
+
+				authClient, err := app.Auth(context.Background())
+				if err != nil {
+					return
+				}
+
+				userRecord, err := authClient.GetUser(context.Background(), uploaderUID)
+				if err == nil && userRecord.Email != "" {
+					subject := fmt.Sprintf("New like on \"%s\" 💖", trackTitle)
+					body := fmt.Sprintf(`
+						<h2>New like on "%s" 💖</h2>
+						<p>Hello!</p>
+						<p><strong>%s</strong> liked your track "<strong>%s</strong>".</p>
+						<p><a href="%s">Check it out on SoundLike!</a></p>
+						<hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
+						<p style="font-size: 12px; color: #888;">Don't want these emails? <a href="%s" style="color: #888;">Unsubscribe</a> in your profile settings.</p>
+					`, trackTitle, likerName, trackTitle, frontendURL, frontendURL)
+					log.Printf("Sending like notification to: %s", userRecord.Email)
+					if err := sendEmail([]string{userRecord.Email}, subject, body); err != nil {
+						log.Printf("Failed to send like notification email: %v", err)
+					}
+				}
+			}(trackID, likerName, user.UID, frontendURL)
+		}
+
 		// 更新後のカウントと状態を返す
 		var newCount int
 		db.QueryRow("SELECT COUNT(*) FROM likes WHERE track_id = ?", trackID).Scan(&newCount)
 		return c.JSON(http.StatusOK, map[string]interface{}{"likes_count": newCount, "is_liked": !exists})
+	})
+
+	// ユーザーフォロー機能 (トグル)
+	apiGroup.POST("/user/:uid/follow", func(c echo.Context) error {
+		user := c.Get("user").(*auth.Token)
+		targetUID := c.Param("uid")
+
+		if user.UID == targetUID {
+			return c.JSON(http.StatusBadRequest, map[string]string{"message": "You cannot follow yourself."})
+		}
+
+		// メール未認証ならフォロー禁止
+		if verified, ok := user.Claims["email_verified"].(bool); !ok || !verified {
+			return c.JSON(http.StatusForbidden, map[string]string{"message": "Email verification is required to follow users."})
+		}
+
+		var exists bool
+		err := db.QueryRow("SELECT EXISTS(SELECT 1 FROM follows WHERE follower_uid = ? AND following_uid = ?)", user.UID, targetUID).Scan(&exists)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, "Database error")
+		}
+
+		if exists {
+			_, err = db.Exec("DELETE FROM follows WHERE follower_uid = ? AND following_uid = ?", user.UID, targetUID)
+			return c.JSON(http.StatusOK, map[string]interface{}{"is_following": false, "message": "Unfollowed successfully."})
+		} else {
+			_, err = db.Exec("INSERT INTO follows (follower_uid, following_uid) VALUES (?, ?)", user.UID, targetUID)
+			return c.JSON(http.StatusOK, map[string]interface{}{"is_following": true, "message": "Followed successfully."})
+		}
+	})
+
+	// フォロー状態確認API
+	apiGroup.GET("/user/:uid/follow/status", func(c echo.Context) error {
+		user := c.Get("user").(*auth.Token)
+		targetUID := c.Param("uid")
+
+		var exists bool
+		err := db.QueryRow("SELECT EXISTS(SELECT 1 FROM follows WHERE follower_uid = ? AND following_uid = ?)", user.UID, targetUID).Scan(&exists)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, "Database error")
+		}
+		return c.JSON(http.StatusOK, map[string]bool{"is_following": exists})
+	})
+
+	// コメント投稿リクエスト構造体
+	type CommentRequest struct {
+		Content string `json:"content"`
+	}
+
+	// コメント投稿API
+	apiGroup.POST("/track/:id/comment", func(c echo.Context) error {
+		user := c.Get("user").(*auth.Token)
+		trackID, err := strconv.Atoi(c.Param("id"))
+		if err != nil {
+			return c.JSON(http.StatusBadRequest, "Invalid track ID")
+		}
+
+		if verified, ok := user.Claims["email_verified"].(bool); !ok || !verified {
+			return c.JSON(http.StatusForbidden, map[string]string{"message": "Email verification is required to comment."})
+		}
+
+		uploaderName, ok := user.Claims["name"].(string)
+		if !ok || uploaderName == "" {
+			return c.JSON(http.StatusForbidden, map[string]string{"message": "Display name is required to comment."})
+		}
+
+		var req CommentRequest
+		if err := c.Bind(&req); err != nil {
+			return c.JSON(http.StatusBadRequest, "Invalid request body")
+		}
+		if len(req.Content) == 0 || len(req.Content) > 500 {
+			return c.JSON(http.StatusBadRequest, map[string]string{"message": "Comment must be between 1 and 500 characters."})
+		}
+
+		_, err = db.Exec("INSERT INTO comments (track_id, user_uid, user_name, content) VALUES (?, ?, ?, ?)", trackID, user.UID, uploaderName, req.Content)
+		if err != nil {
+			log.Printf("error inserting comment: %v\n", err)
+			return c.JSON(http.StatusInternalServerError, "Failed to post comment")
+		}
+
+		// --- コメント通知処理 (非同期) ---
+		go func(trackID int, commenterName, commentContent, commenterUID, frontendURL string) {
+			// トラックの投稿者を取得
+			var uploaderUID, trackTitle string
+			err := db.QueryRow("SELECT uploader_uid, title FROM tracks WHERE id = ?", trackID).Scan(&uploaderUID, &trackTitle)
+			if err != nil {
+				return
+			}
+
+			// 自分の投稿へのコメントなら通知しない
+			if uploaderUID == commenterUID {
+				return
+			}
+
+			// 通知設定を確認
+			if !shouldNotify(uploaderUID) {
+				return
+			}
+
+			authClient, err := app.Auth(context.Background())
+			if err != nil {
+				return
+			}
+
+			// 投稿者のメールアドレスを取得して送信
+			userRecord, err := authClient.GetUser(context.Background(), uploaderUID)
+			if err == nil && userRecord.Email != "" {
+				subject := fmt.Sprintf("New comment on \"%s\" 💬", trackTitle)
+				body := fmt.Sprintf(`
+					<h2>New comment on "%s" 💬</h2>
+					<p>Hello!</p>
+					<p><strong>%s</strong> commented on your track "<strong>%s</strong>":</p>
+					<blockquote style="border-left: 4px solid #ccc; padding-left: 10px; color: #555;">%s</blockquote>
+					<p><a href="%s">Check it out on SoundLike!</a></p>
+					<hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
+					<p style="font-size: 12px; color: #888;">Don't want these emails? <a href="%s" style="color: #888;">Unsubscribe</a> in your profile settings.</p>
+				`, trackTitle, commenterName, trackTitle, commentContent, frontendURL, frontendURL)
+				log.Printf("Sending comment notification to: %s", userRecord.Email)
+				if err := sendEmail([]string{userRecord.Email}, subject, body); err != nil {
+					log.Printf("Failed to send comment notification email: %v", err)
+				}
+			}
+		}(trackID, uploaderName, req.Content, user.UID, frontendURL)
+
+		return c.JSON(http.StatusOK, map[string]string{"message": "Comment posted successfully!"})
+	})
+
+	// コメント削除API
+	apiGroup.DELETE("/comment/:id", func(c echo.Context) error {
+		user := c.Get("user").(*auth.Token)
+		commentID, err := strconv.Atoi(c.Param("id"))
+		if err != nil {
+			return c.JSON(http.StatusBadRequest, "Invalid comment ID")
+		}
+
+		// 自分のコメントのみ削除可能
+		result, err := db.Exec("DELETE FROM comments WHERE id = ? AND user_uid = ?", commentID, user.UID)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, "Database error")
+		}
+		rowsAffected, _ := result.RowsAffected()
+		if rowsAffected == 0 {
+			return c.JSON(http.StatusForbidden, "Cannot delete comment (not found or not yours)")
+		}
+		return c.JSON(http.StatusOK, map[string]string{"message": "Comment deleted."})
 	})
 
 	// 曲の削除API
@@ -521,6 +991,10 @@ func main() {
 		// 先にDBから関連データを削除
 		if _, err := tx.Exec("DELETE FROM likes WHERE track_id = ?", trackID); err != nil {
 			return c.JSON(http.StatusInternalServerError, "Error deleting likes")
+		}
+		// 関連するコメントを削除
+		if _, err := tx.Exec("DELETE FROM comments WHERE track_id = ?", trackID); err != nil {
+			return c.JSON(http.StatusInternalServerError, "Error deleting comments")
 		}
 		if _, err := tx.Exec("DELETE FROM tracks WHERE id = ?", trackID); err != nil {
 			return c.JSON(http.StatusInternalServerError, "Error deleting track metadata")
@@ -579,6 +1053,26 @@ func main() {
 			return c.JSON(http.StatusInternalServerError, "Error deleting likes on user tracks")
 		}
 
+		// 4. ユーザーのコメントを削除
+		if _, err := tx.Exec("DELETE FROM comments WHERE user_uid = ?", uid); err != nil {
+			return c.JSON(http.StatusInternalServerError, "Error deleting user comments")
+		}
+
+		// 5. ユーザーのトラックについたコメントを削除
+		if _, err := tx.Exec("DELETE FROM comments WHERE track_id IN (SELECT id FROM tracks WHERE uploader_uid = ?)", uid); err != nil {
+			return c.JSON(http.StatusInternalServerError, "Error deleting comments on user tracks")
+		}
+
+		// 6. フォロー情報を削除 (フォローしている、されている両方)
+		if _, err := tx.Exec("DELETE FROM follows WHERE follower_uid = ? OR following_uid = ?", uid, uid); err != nil {
+			return c.JSON(http.StatusInternalServerError, "Error deleting user follows")
+		}
+
+		// 7. ユーザー設定を削除
+		if _, err := tx.Exec("DELETE FROM user_settings WHERE user_uid = ?", uid); err != nil {
+			return c.JSON(http.StatusInternalServerError, "Error deleting user settings")
+		}
+
 		// 4. トラック情報を削除
 		if _, err := tx.Exec("DELETE FROM tracks WHERE uploader_uid = ?", uid); err != nil {
 			return c.JSON(http.StatusInternalServerError, "Error deleting user tracks")
@@ -600,5 +1094,10 @@ func main() {
 		return c.JSON(http.StatusOK, map[string]string{"message": "Account data deleted successfully."})
 	})
 
-	e.Logger.Fatal(e.Start(":8080"))
+	// RenderなどのPaaSは環境変数PORTでポートを指定してくるため対応する
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	e.Logger.Fatal(e.Start(":" + port))
 }

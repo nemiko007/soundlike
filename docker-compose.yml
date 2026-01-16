@@ -13,6 +13,8 @@ services:
     environment:
       GOOGLE_APPLICATION_CREDENTIALS: /root/firebase-service-account-key.json
       TZ: Asia/Tokyo # タイムゾーンを設定
+    env_file:
+      - .env # ホストの.envファイルを読み込んで環境変数としてコンテナに渡す
     restart: always # コンテナが停止した場合に常に再起動
 
   frontend:
