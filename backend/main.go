@@ -352,6 +352,11 @@ func main() {
 	// --- 公開エンドポイント ---
 	e.Static("/uploads", "uploads")
 
+	// Renderのヘルスチェック等に対応するためのルートハンドラ
+	e.GET("/", func(c echo.Context) error {
+		return c.String(http.StatusOK, "SoundLike Backend API is running")
+	})
+
 	e.GET("/api/tracks", func(c echo.Context) error {
 		// 任意の認証チェック（ログインしていれば is_liked を判定するため）
 		var currentUserID string
