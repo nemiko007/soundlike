@@ -877,16 +877,23 @@ func main() {
 			go func(targetUID, followerName, frontendURL string) {
 				// 通知設定を確認
 				if !shouldNotify(targetUID) {
+					log.Printf("Follow notification skipped: User %s has disabled notifications.", targetUID)
 					return
 				}
 
 				authClient, err := app.Auth(context.Background())
 				if err != nil {
+					log.Printf("Follow notification error: Failed to get Auth client: %v", err)
 					return
 				}
 
 				userRecord, err := authClient.GetUser(context.Background(), targetUID)
-				if err == nil && userRecord.Email != "" {
+				if err != nil {
+					log.Printf("Follow notification error: Failed to get user %s from Firebase: %v", targetUID, err)
+					return
+				}
+
+				if userRecord.Email != "" {
 					subject := "New follower! 🌟"
 					body := fmt.Sprintf(`
 						<h2>You have a new follower! 🌟</h2>
@@ -900,6 +907,8 @@ func main() {
 					if err := sendEmail([]string{userRecord.Email}, subject, body); err != nil {
 						log.Printf("Failed to send follow notification email: %v", err)
 					}
+				} else {
+					log.Printf("Follow notification skipped: User %s has no email address.", targetUID)
 				}
 			}(targetUID, followerName, frontendURL)
 
