@@ -838,6 +838,42 @@ func main() {
 			return c.JSON(http.StatusOK, map[string]interface{}{"is_following": false, "message": "Unfollowed successfully."})
 		} else {
 			_, err = db.Exec("INSERT INTO follows (follower_uid, following_uid) VALUES (?, ?)", user.UID, targetUID)
+
+			// --- フォロー通知処理 (非同期) ---
+			followerName, _ := user.Claims["name"].(string)
+			if followerName == "" {
+				followerName = "Someone"
+			}
+
+			go func(targetUID, followerName, frontendURL string) {
+				// 通知設定を確認
+				if !shouldNotify(targetUID) {
+					return
+				}
+
+				authClient, err := app.Auth(context.Background())
+				if err != nil {
+					return
+				}
+
+				userRecord, err := authClient.GetUser(context.Background(), targetUID)
+				if err == nil && userRecord.Email != "" {
+					subject := "New follower! 🌟"
+					body := fmt.Sprintf(`
+						<h2>You have a new follower! 🌟</h2>
+						<p>Hello!</p>
+						<p><strong>%s</strong> is now following you.</p>
+						<p><a href="%s">Check out their profile on SoundLike!</a></p>
+						<hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
+						<p style="font-size: 12px; color: #888;">Don't want these emails? <a href="%s" style="color: #888;">Unsubscribe</a> in your profile settings.</p>
+					`, followerName, frontendURL, frontendURL)
+					log.Printf("Sending follow notification to: %s", userRecord.Email)
+					if err := sendEmail([]string{userRecord.Email}, subject, body); err != nil {
+						log.Printf("Failed to send follow notification email: %v", err)
+					}
+				}
+			}(targetUID, followerName, frontendURL)
+
 			return c.JSON(http.StatusOK, map[string]interface{}{"is_following": true, "message": "Followed successfully."})
 		}
 	})
