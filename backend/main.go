@@ -2,13 +2,14 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
-	"net/smtp"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -81,17 +82,6 @@ func firebaseAuthMiddleware(app *firebase.App) echo.MiddlewareFunc {
 
 var db *sql.DB // グローバル変数としてデータベース接続を保持
 
-// SMTPConfig はメール送信設定を保持する構造体
-type SMTPConfig struct {
-	Host     string
-	Port     string
-	User     string
-	Password string
-	From     string
-}
-
-var smtpConfig SMTPConfig
-
 // loadEnv は.envファイルが存在する場合に読み込んで環境変数をセットする
 func loadEnv() {
 	file, err := os.Open(".env")
@@ -124,19 +114,70 @@ func loadEnv() {
 
 // sendEmail はSMTPを使用してメールを送信するヘルパー関数
 func sendEmail(to []string, subject, body string) error {
-	if smtpConfig.Host == "" || smtpConfig.Port == "" || smtpConfig.User == "" || smtpConfig.Password == "" {
+	apiKey := os.Getenv("BREVO_API_KEY")
+	senderEmail := os.Getenv("BREVO_SENDER_EMAIL")
+	senderName := "SoundLike"
+
+	if apiKey == "" || senderEmail == "" {
 		// 設定がない場合はログを出してスキップ（開発環境などでエラーにならないように）
-		log.Println("SMTP configuration missing, skipping email sending.")
+		log.Println("Email configuration missing (BREVO_API_KEY or BREVO_SENDER_EMAIL), skipping email sending.")
 		return nil
 	}
 
-	auth := smtp.PlainAuth("", smtpConfig.User, smtpConfig.Password, smtpConfig.Host)
+	// Brevo APIのリクエストボディを作成
+	type Recipient struct {
+		Email string `json:"email"`
+	}
+	type Sender struct {
+		Name  string `json:"name"`
+		Email string `json:"email"`
+	}
+	type EmailRequest struct {
+		Sender      Sender      `json:"sender"`
+		To          []Recipient `json:"to"`
+		Subject     string      `json:"subject"`
+		HtmlContent string      `json:"htmlContent"`
+	}
 
-	msg := []byte(fmt.Sprintf("From: SoundLike <%s>\r\nTo: %s\r\nSubject: %s\r\nMIME-Version: 1.0\r\nContent-Type: text/html; charset=\"UTF-8\"\r\n\r\n%s", smtpConfig.From, strings.Join(to, ","), subject, body))
-	addr := fmt.Sprintf("%s:%s", smtpConfig.Host, smtpConfig.Port)
+	var recipients []Recipient
+	for _, email := range to {
+		recipients = append(recipients, Recipient{Email: email})
+	}
 
-	// 送信元(from)を設定して送信
-	return smtp.SendMail(addr, auth, smtpConfig.From, to, msg)
+	reqBody := EmailRequest{
+		Sender:      Sender{Name: senderName, Email: senderEmail},
+		To:          recipients,
+		Subject:     subject,
+		HtmlContent: body,
+	}
+
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("failed to marshal email request: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", "https://api.brevo.com/v3/smtp/email", bytes.NewBuffer(jsonBody))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("accept", "application/json")
+	req.Header.Set("api-key", apiKey)
+	req.Header.Set("content-type", "application/json")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send request to Brevo: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("Brevo API error: %s - %s", resp.Status, string(bodyBytes))
+	}
+
+	return nil
 }
 
 // shouldNotify は指定されたユーザーがメール通知を許可しているかを確認する
@@ -168,20 +209,8 @@ func main() {
 		frontendURL = "http://localhost:3000"
 	}
 
-	// SMTP設定を初期化
-	smtpConfig = SMTPConfig{
-		Host:     os.Getenv("SMTP_HOST"),
-		Port:     os.Getenv("SMTP_PORT"),
-		User:     os.Getenv("SMTP_USER"),
-		Password: os.Getenv("SMTP_PASSWORD"),
-		From:     os.Getenv("SMTP_FROM"),
-	}
-	if smtpConfig.From == "" {
-		smtpConfig.From = smtpConfig.User // FROMが未設定の場合はUSERを使用
-	}
-
-	// デバッグ用: 読み込まれたSMTP設定をログ出力 (パスワードは隠す)
-	log.Printf("SMTP Configuration loaded: Host='%s', Port='%s', User='%s', From='%s'", smtpConfig.Host, smtpConfig.Port, smtpConfig.User, smtpConfig.From)
+	// デバッグ用: メール設定の確認
+	log.Printf("Email Configuration: BREVO_SENDER_EMAIL='%s', BREVO_API_KEY set=%v", os.Getenv("BREVO_SENDER_EMAIL"), os.Getenv("BREVO_API_KEY") != "")
 
 	app, err := firebase.NewApp(ctx, nil)
 	if err != nil {
